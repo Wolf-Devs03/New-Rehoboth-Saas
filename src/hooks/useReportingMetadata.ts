@@ -1,34 +1,43 @@
 import { useState, useEffect } from 'react';
 import { calculateCompanyKPIs } from '../utils/mappingEngine';
 import { useAuth } from '../components/AuthContext';
+import { getDailyServicingRows } from '../utils/indexedDB';
 
 export function useReportingMetadata() {
   const { user } = useAuth();
 
-  const [metadata, setMetadata] = useState(() => {
-    try {
-      const rows = JSON.parse(localStorage.getItem('servicingDataRows') || '[]');
-      const { reportingMonth, lastUpload } = calculateCompanyKPIs(rows);
-      return { reportingMonth, lastUpload };
-    } catch (e) {
-      return { reportingMonth: '—', lastUpload: '—' };
-    }
+  const [metadata, setMetadata] = useState<{ reportingMonth: string; lastUpload: string }>({
+    reportingMonth: '—',
+    lastUpload: '—'
   });
 
   useEffect(() => {
-    const handleUpdate = () => {
+    let isMounted = true;
+
+    const loadMetadata = async () => {
       try {
-        const rows = JSON.parse(localStorage.getItem('servicingDataRows') || '[]');
+        const rows = await getDailyServicingRows();
         const { reportingMonth, lastUpload } = calculateCompanyKPIs(rows);
-        setMetadata({ reportingMonth, lastUpload });
+        if (isMounted) {
+          setMetadata({ reportingMonth, lastUpload });
+        }
       } catch (e) {
-        console.error("Hook calculation failed", e);
+        if (isMounted) {
+          setMetadata({ reportingMonth: '—', lastUpload: '—' });
+        }
       }
+    };
+
+    loadMetadata();
+
+    const handleUpdate = () => {
+      loadMetadata();
     };
 
     window.addEventListener('servicing-rows-updated', handleUpdate);
     window.addEventListener('storage', handleUpdate);
     return () => {
+      isMounted = false;
       window.removeEventListener('servicing-rows-updated', handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };

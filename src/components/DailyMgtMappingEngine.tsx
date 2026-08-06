@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { getDailyServicingRows, saveDailyServicingData } from '../utils/indexedDB';
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -33,7 +34,6 @@ import {
   recalculateAllPerformances
 } from '../utils/mappingEngine';
 import { classifyServicingRows, summarizeClassification } from '../utils/classification';
-import { getDailyServicingRows, saveDailyServicingData } from '../utils/indexedDB';
 
 interface DailyMgtMappingEngineProps {
   transactions: any[];
@@ -67,13 +67,16 @@ export default function DailyMgtMappingEngine({
     return saved ? JSON.parse(saved) : [];
   }, []);
 
-  const existingTransactions = useMemo<any[]>(() => {
-    const saved = localStorage.getItem('servicingDataRows');
-    try {
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
+  const [existingTransactions, setExistingTransactions] = useState<any[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    getDailyServicingRows().then(rows => {
+      if (isMounted) setExistingTransactions(rows);
+    }).catch(err => {
+      console.error('Failed loading daily servicing rows in DailyMgtMappingEngine:', err);
+    });
+    return () => { isMounted = false; };
   }, []);
 
   // Tabs: 'summary' | 'owners' | 'personnel' | 'transactions' | 'validation'
@@ -202,8 +205,8 @@ export default function DailyMgtMappingEngine({
   const handleConfirmImport = () => {
     setIsImporting(true);
 
-    setTimeout(() => {
-      // 1. Append transactions to servicingDataRows, discarding true duplicates
+    setTimeout(async () => {
+      // 1. Append transactions to IndexedDB, discarding true duplicates
       const newServicingRows = mappedTransactions
         .filter(t => t.isMapped && !t.isDuplicate)
         .map(t => ({
@@ -223,29 +226,7 @@ export default function DailyMgtMappingEngine({
           "source_balance_after": t.sourceBalanceAfter
         }));
 
-      const existingServRows = JSON.parse(localStorage.getItem('servicingDataRows') || '[]');
-      
-      const existingKeys = new Set(
-        existingServRows.map((r: any) => {
-          const id = r['Transaction ID'] || r['transactionId'] || '';
-          const msisdn = (r['Branch_msisdn'] || r['branch_msisdn'] || '').trim();
-          return id && msisdn ? `${id.toLowerCase()}_${msisdn}` : '';
-        }).filter(Boolean)
-      );
-
-      const uniqueNewRows = newServicingRows.filter(r => {
-        const id = r['Transaction ID'];
-        const msisdn = r['Branch_msisdn'];
-        const key = `${id.toLowerCase()}_${msisdn}`;
-        if (existingKeys.has(key)) {
-          return false; // discard
-        }
-        existingKeys.add(key);
-        return true;
-      });
-
-      const updatedServRows = [...uniqueNewRows, ...existingServRows];
-      localStorage.setItem('servicingDataRows', JSON.stringify(updatedServRows));
+      await saveDailyServicingData(newServicingRows);
 
       // Run Transaction Classification Engine
       const saTillRegistry = JSON.parse(localStorage.getItem('saTillRegistry') || '[]');

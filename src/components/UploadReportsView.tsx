@@ -57,7 +57,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { recalculateAllPerformances, mapTransactions, formatToISODate } from '../utils/mappingEngine';
 import { classifyServicingRows, summarizeClassification } from '../utils/classification';
 import { invalidateClassificationCache } from '../utils/classificationCache';
-import { saveMonthlyServicingData, getServicingRows, getServicingColumns, saveWeeklyServicingData, getWeeklyServicingRows, getWeeklyServicingColumns } from '../utils/indexedDB';
+import { saveMonthlyServicingData, getServicingRows, getServicingColumns, saveWeeklyServicingData, getWeeklyServicingRows, getWeeklyServicingColumns, saveDailyServicingData, getDailyServicingRows, clearDailyServicingData } from '../utils/indexedDB';
 import { useReportingMetadata } from '../hooks/useReportingMetadata';
 
 // Executive KPI Analysis Engine Modular Subcomponents
@@ -1356,7 +1356,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
   };
 
   // Native CSV parser
-  const parseCSVFile = (text: string) => {
+  const parseCSVFile = async (text: string) => {
     const lines = text.split(/\r?\n/);
     if (lines.length === 0) return;
 
@@ -1405,14 +1405,12 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
         const saved = localStorage.getItem('personnelList');
         return saved ? JSON.parse(saved) : [];
       })();
-      const existingTransactions = (() => {
-        const saved = localStorage.getItem('servicingDataRows');
-        try {
-          return saved ? JSON.parse(saved) : [];
-        } catch (e) {
-          return [];
-        }
-      })();
+      let existingTransactions: any[] = [];
+      try {
+        existingTransactions = await getDailyServicingRows();
+      } catch (e) {
+        console.error("Failed loading existing transactions for MGT mapping:", e);
+      }
 
       const txns = mapTransactions(parsedRows, tillsList, currentOwners, currentPersonnel, existingTransactions);
 
@@ -1814,7 +1812,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
 
       // Progressive Stepper Simulation
       let currentStep = 0;
-      const interval = setInterval(() => {
+      const interval = setInterval(async () => {
         currentStep += 1;
         setActiveStep(currentStep);
         setImportProgress(Math.min(Math.round((currentStep / progressSteps.length) * 100), 100));
@@ -1846,38 +1844,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
             };
           });
 
-          const existingServRows = JSON.parse(localStorage.getItem('servicingDataRows') || '[]');
-          
-          const existingKeys = new Set(
-            existingServRows.map((r: any) => {
-              const id = r['Transaction ID'] || r['transactionId'] || '';
-              const msisdn = (r['Branch_msisdn'] || r['branch_msisdn'] || '').trim();
-              return id && msisdn ? `${id.toLowerCase()}_${msisdn}` : '';
-            }).filter(Boolean)
-          );
-
-          const uniqueNewRows = newServicingRows.filter(r => {
-            const id = r['Transaction ID'];
-            const msisdn = r['Branch_msisdn'];
-            const key = `${id.toLowerCase()}_${msisdn}`;
-            if (existingKeys.has(key)) {
-              return false; // discard
-            }
-            existingKeys.add(key);
-            return true;
-          });
-
-          const updatedServRows = [...uniqueNewRows, ...existingServRows];
-          try {
-            localStorage.setItem('servicingDataRows', JSON.stringify(updatedServRows));
-          } catch (e) {
-            console.warn('servicingDataRows exceeded localStorage quota, storing truncated copy:', e);
-            try {
-              localStorage.setItem('servicingDataRows', JSON.stringify(updatedServRows.slice(0, 1000)));
-            } catch (err) {
-              console.warn('Could not store servicingDataRows in localStorage:', err);
-            }
-          }
+          await saveDailyServicingData(newServicingRows);
           invalidateClassificationCache();
 
           // Run Transaction Classification Engine
@@ -1891,7 +1858,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
           setLastClassificationSummary(classSummary);
 
           // Recalculate and synchronize all performance metrics based on MGT contribution
-          recalculateAllPerformances();
+          await recalculateAllPerformances();
           window.dispatchEvent(new Event('servicing-rows-updated'));
 
           // Append Audit Logs to Local Storage
@@ -2351,10 +2318,9 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
           </div>
           <button
             id="clear-ledger-btn"
-            onClick={() => {
+            onClick={async () => {
               if (window.confirm("Are you sure you want to clear all ingested transaction data? This cannot be undone and you will need to re-upload your MGT files to restore history.")) {
-                localStorage.removeItem('servicingDataRows');
-                window.dispatchEvent(new Event('storage'));
+                await clearDailyServicingData();
                 window.location.reload();
               }
             }}

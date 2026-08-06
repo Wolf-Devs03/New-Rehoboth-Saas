@@ -5,6 +5,7 @@ import { useAuth } from './AuthContext';
 import { useCompany } from './CompanyContext';
 import { getAvatarUrl } from '../utils/avatar';
 import OwnerAvatar from './OwnerAvatar';
+import { getDailyServicingRows } from '../utils/indexedDB';
 import { 
   Users, 
   Search, 
@@ -808,19 +809,7 @@ export default function PeopleManagementView({
   } | null>(null);
 
   // Dynamic high-fidelity performance metrics generator
-  const getPerformanceMetrics = (name: string, isOwner: boolean, tillsStr: string) => {
-    // 1. Try to fetch real servicingDataRows
-    let realRows: any[] = [];
-    const savedServicing = localStorage.getItem('servicingDataRows');
-    if (savedServicing) {
-      try {
-        const rows = JSON.parse(savedServicing);
-        if (Array.isArray(rows)) {
-          realRows = rows;
-        }
-      } catch(e) {}
-    }
-
+  const getPerformanceMetrics = (name: string, isOwner: boolean, tillsStr: string, realRows: any[] = []) => {
     const tillsList = tillsStr.split(',').map(t => t.trim()).filter(Boolean);
 
     // Helper to get served amount of a row (absolute value of negative transactions)
@@ -971,12 +960,19 @@ export default function PeopleManagementView({
     };
   };
 
-  const handleOpenProfile = (type: 'Owner' | 'Personnel', record: any) => {
+  const handleOpenProfile = async (type: 'Owner' | 'Personnel', record: any) => {
     const tillsStr = type === 'Owner' 
       ? (record.assignedTills ? record.assignedTills.join(', ') : '') 
       : (record.assignedTill || '');
 
-    const metrics = getPerformanceMetrics(record.name, type === 'Owner', tillsStr);
+    let rows: any[] = [];
+    try {
+      rows = await getDailyServicingRows();
+    } catch (e) {
+      console.error('Failed to load daily servicing rows in handleOpenProfile:', e);
+    }
+
+    const metrics = getPerformanceMetrics(record.name, type === 'Owner', tillsStr, rows);
     setSelectedProfile({ type, record, metrics });
   };
 

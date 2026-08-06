@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { Owner } from '../types';
 
+import { getDailyServicingRows } from '../utils/indexedDB';
+
 interface TransactionHistorySectionProps {
   localOwner: Owner;
   tillsList: any[];
@@ -31,16 +33,27 @@ export default function TransactionHistorySection({ localOwner, tillsList }: Tra
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 25;
 
-  // Load servicingDataRows from localStorage
+  // Load daily servicing rows from IndexedDB
   useEffect(() => {
-    const saved = localStorage.getItem('servicingDataRows');
-    if (saved) {
+    let isMounted = true;
+    const loadData = async () => {
       try {
-        setAllRows(JSON.parse(saved));
+        const rows = await getDailyServicingRows();
+        if (isMounted) {
+          setAllRows(rows);
+        }
       } catch (e) {
-        console.error('Failed to parse servicingDataRows in TransactionHistorySection:', e);
+        console.error('Failed to load daily servicing rows in TransactionHistorySection:', e);
       }
-    }
+    };
+
+    loadData();
+
+    window.addEventListener('servicing-rows-updated', loadData);
+    return () => {
+      isMounted = false;
+      window.removeEventListener('servicing-rows-updated', loadData);
+    };
   }, []);
 
   // Filter rows belonging to this owner's tills

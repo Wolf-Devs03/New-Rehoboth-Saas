@@ -22,7 +22,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import { getServicingRows } from '../utils/indexedDB';
+import { getServicingRows, getDailyServicingRows } from '../utils/indexedDB';
 import { calculateCompanyKPIs } from '../utils/mappingEngine';
 import { exportKPIAnalysisToPDF, exportKPIDataToCSV } from '../utils/pdfExport';
 import { getClassifiedRowsCached } from '../utils/classificationCache';
@@ -84,10 +84,7 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
       try {
         let rows = await getServicingRows();
         if (!rows || rows.length === 0) {
-          const savedServicing = localStorage.getItem('servicingDataRows');
-          if (savedServicing) {
-            try { rows = JSON.parse(savedServicing); } catch (e) {}
-          }
+          rows = await getDailyServicingRows();
         }
         const savedSaTill = localStorage.getItem('saTillRegistry');
         const savedBaseWakala = localStorage.getItem('baseWakalaIndex');
@@ -299,14 +296,11 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
           activeMonth = history[0].reportingMonth;
         }
       } else {
-        const savedServicing = localStorage.getItem('servicingDataRows');
-        if (savedServicing) {
-          const rows = JSON.parse(savedServicing);
-          if (Array.isArray(rows) && rows.length > 0) {
-            const companyKPIs = calculateCompanyKPIs(rows);
-            if (companyKPIs.reportingMonth && companyKPIs.reportingMonth !== '—') {
-              activeMonth = companyKPIs.reportingMonth;
-            }
+        const rows = await getDailyServicingRows();
+        if (Array.isArray(rows) && rows.length > 0) {
+          const companyKPIs = calculateCompanyKPIs(rows);
+          if (companyKPIs.reportingMonth && companyKPIs.reportingMonth !== '—') {
+            activeMonth = companyKPIs.reportingMonth;
           }
         }
       }

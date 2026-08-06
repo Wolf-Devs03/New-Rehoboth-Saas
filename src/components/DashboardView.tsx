@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ViewType, KPIMetric, TopOwner, RecentReport, AuditReport } from '../types';
 import { dashboardKPIs, topOwners, recentReports, ownersList } from '../data';
 import { calculateCompanyKPIs } from '../utils/mappingEngine';
+import { getDailyServicingRows } from '../utils/indexedDB';
 import { 
   TrendingUp, 
   Users, 
@@ -72,17 +73,6 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
     }
     return [];
   });
-
-  const getParsedServicingRows = (): any[] => {
-    const savedServicing = localStorage.getItem('servicingDataRows');
-    if (savedServicing) {
-      try {
-        const parsed = JSON.parse(savedServicing);
-        if (Array.isArray(parsed)) return parsed;
-      } catch (e) {}
-    }
-    return [];
-  };
 
   const computeTopOwnersList = (rows: any[]): TopOwner[] => {
     if (rows && rows.length > 0) {
@@ -159,8 +149,8 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
     return [];
   };
 
-  const [companyKPIs, setCompanyKPIs] = useState(() => calculateCompanyKPIs(getParsedServicingRows()));
-  const [topOwnersList, setTopOwnersList] = useState<TopOwner[]>(() => computeTopOwnersList(getParsedServicingRows()));
+  const [companyKPIs, setCompanyKPIs] = useState(() => calculateCompanyKPIs([]));
+  const [topOwnersList, setTopOwnersList] = useState<TopOwner[]>([]);
 
   // Dynamic Recent Reports list derived from the persisted audit history logs
   const [recentReportsList, setRecentReportsList] = useState<RecentReport[]>(() => {
@@ -189,10 +179,26 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
   });
 
   useEffect(() => {
+    let isMounted = true;
+
+    const loadData = async () => {
+      let rows: any[] = [];
+      try {
+        rows = await getDailyServicingRows();
+      } catch (e) {
+        console.error("Failed to load daily servicing rows in DashboardView:", e);
+      }
+
+      if (isMounted) {
+        setCompanyKPIs(calculateCompanyKPIs(rows));
+        setTopOwnersList(computeTopOwnersList(rows));
+      }
+    };
+
+    loadData();
+
     const handleUpdate = () => {
-      const rows = getParsedServicingRows();
-      setCompanyKPIs(calculateCompanyKPIs(rows));
-      setTopOwnersList(computeTopOwnersList(rows));
+      loadData();
 
       const savedKpis = localStorage.getItem('dashboardKPIs');
       if (savedKpis) {
@@ -231,9 +237,12 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
         setRecentReportsList([]);
       }
     };
+
     window.addEventListener('servicing-rows-updated', handleUpdate);
     window.addEventListener('storage', handleUpdate);
+
     return () => {
+      isMounted = false;
       window.removeEventListener('servicing-rows-updated', handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };

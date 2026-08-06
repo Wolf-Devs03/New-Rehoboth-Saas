@@ -1,0 +1,6 @@
+{
+  "name": "REHOBOTH ENTERPRISES",
+  "description": "Executive fintech dashboard and Tanzania Master Agent System (TRIMS) for tracking KPI metrics, owner portfolios, report histories, and secure portal access.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

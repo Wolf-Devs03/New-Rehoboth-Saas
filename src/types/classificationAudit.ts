@@ -1,7 +1,6 @@
 export type ClassificationBucket = 
   | 'SA_INTERNAL' 
   | 'BASE' 
-  | 'BASE_CROSS_OWNER' 
   | 'IOP';
 
 export interface ClassificationAuditRecord {

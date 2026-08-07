@@ -831,23 +831,12 @@ export default function PeopleManagementView({
       const rowName = row['Wakala Owner'] || row['Wakala Name'] || row['Name'] || row['ownerName'] || '';
       const rowTill = row['Branch_msisdn'] || row['transactionTill'] || row['Agent ID'] || row['AgentID'] || '';
       return (
-        rowName.toLowerCase() === name.toLowerCase() ||
-        tillsList.includes(rowTill)
+        (rowName && rowName.toLowerCase() === name.toLowerCase()) ||
+        (rowTill && tillsList.includes(rowTill))
       );
     };
 
     const userRows = realRows.filter(belongsToPerson);
-
-    const hashString = (str: string) => {
-      let hash = 0;
-      for (let i = 0; i < str.length; i++) {
-        hash = str.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      return Math.abs(hash);
-    };
-
-    const hash = hashString(name);
-    const volumeMultiplier = isOwner ? 4.5 : 1.2;
 
     // Find latest day in servicingDataRows where served transactions happened
     const negativeRows = realRows.filter(row => getServedAmountOfRow(row) > 0);
@@ -862,7 +851,7 @@ export default function PeopleManagementView({
     }
 
     let todayTxCount = 0;
-    let totalValue = 0;
+    const totalValue = userRows.reduce((acc, r) => acc + getServedAmountOfRow(r), 0);
     let contributionKPI = 0;
     let recentTxList: any[] = [];
 
@@ -874,17 +863,28 @@ export default function PeopleManagementView({
       const personTotalServed = personDayRows.reduce((acc, r) => acc + getServedAmountOfRow(r), 0);
 
       todayTxCount = personDayRows.length;
-      totalValue = personTotalServed;
 
       if (companyTotalServed > 0) {
         contributionKPI = parseFloat(((personTotalServed / companyTotalServed) * 100).toFixed(1));
       }
 
-      recentTxList = personDayRows.slice(0, 5).map((row, idx) => {
+      const rowsForList = personDayRows.length > 0 ? personDayRows : userRows;
+      recentTxList = rowsForList.slice(0, 5).map((row, idx) => {
         const amt = parseFloat(String(row['Volume (TZS)'] || row['Volume'] || row['Amount'] || row['value'] || row['volume'] || 0).replace(/,/g, ''));
         return {
-          id: row['Transaction ID'] || row['TransactionID'] || `TX-${99000 + idx}`,
-          date: row['Servicing Date'] || row['date'] || 'Jul 8, 2026',
+          id: row['Transaction ID'] || row['TransactionID'] || `TX-${row['Index'] || idx + 1}`,
+          date: row['Servicing Date'] || row['date'] || selectedDay,
+          type: amt < 0 ? 'Cash Out Ingestion (Served)' : 'Float Ingestion',
+          amount: Math.abs(amt),
+          status: row['Status'] || 'Verified'
+        };
+      });
+    } else if (userRows.length > 0) {
+      recentTxList = userRows.slice(0, 5).map((row, idx) => {
+        const amt = parseFloat(String(row['Volume (TZS)'] || row['Volume'] || row['Amount'] || row['value'] || row['volume'] || 0).replace(/,/g, ''));
+        return {
+          id: row['Transaction ID'] || row['TransactionID'] || `TX-${row['Index'] || idx + 1}`,
+          date: row['Servicing Date'] || row['date'] || 'N/A',
           type: amt < 0 ? 'Cash Out Ingestion (Served)' : 'Float Ingestion',
           amount: Math.abs(amt),
           status: row['Status'] || 'Verified'
@@ -892,60 +892,83 @@ export default function PeopleManagementView({
       });
     }
 
-    // Default mock / fallback values if no transactions or no selected day
-    let monthlyTxCount = userRows.length;
-    if (monthlyTxCount === 0) {
-      monthlyTxCount = 80 + (hash % 120);
-    }
+    const monthlyTxCount = userRows.length;
+    const avgDailyValue = userRows.length > 0 ? totalValue / 28 : 0;
 
-    if (totalValue === 0) {
-      totalValue = (2000000 + (hash % 6000000)) * volumeMultiplier;
-    }
-
-    if (todayTxCount === 0) {
-      todayTxCount = Math.round(monthlyTxCount / 22) + (hash % 3);
-    }
-
-    const avgDailyValue = totalValue / 28;
-
-    if (contributionKPI === 0) {
-      contributionKPI = parseFloat((Math.min(2.0 + (hash % 12) * 0.8, 18.5)).toFixed(1));
-    }
-
-    const rankNum = 1 + (hash % 8);
-
-    // Deterministic timeline points
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const activityTimeline = days.map((day, idx) => {
-      const dayHash = hash + idx * 23;
-      return {
-        date: day,
-        count: 5 + (dayHash % 12),
-        value: Math.round((totalValue / 30) * (0.7 + (dayHash % 5) * 0.15))
-      };
-    });
-
-    const performanceTrend = ['Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'].map((m, idx) => {
-      const monthHash = hash + idx * 47;
-      return {
-        date: m,
-        rate: 72 + (monthHash % 25)
-      };
-    });
-
-    // Default mock transactions if empty
-    if (recentTxList.length === 0) {
-      for (let i = 0; i < 5; i++) {
-        const txHash = hash + i * 19;
-        recentTxList.push({
-          id: `TX-${99100 + i}`,
-          date: `Jul ${8 - i}, 2026`,
-          type: i % 2 === 0 ? 'Liquidity Top-Up' : 'Daily Reconciliation Ref',
-          amount: 250000 + (txHash % 850000),
-          status: i === 4 ? 'Pending Audit' : 'Verified'
-        });
+    // Real rank calculation
+    let rankNum = 0;
+    if (totalValue > 0 && realRows.length > 0) {
+      const ownerVolumes = new Map<string, number>();
+      for (const row of realRows) {
+        const ownerName = row['Wakala Owner'] || row['Wakala Name'] || row['Name'] || row['ownerName'] || '';
+        if (!ownerName) continue;
+        const key = ownerName.toLowerCase();
+        const vol = getServedAmountOfRow(row);
+        ownerVolumes.set(key, (ownerVolumes.get(key) || 0) + vol);
+      }
+      const sortedVolumes = Array.from(ownerVolumes.values()).sort((a, b) => b - a);
+      const myVol = totalValue;
+      const foundIdx = sortedVolumes.findIndex(v => v <= myVol);
+      if (foundIdx !== -1) {
+        rankNum = foundIdx + 1;
       }
     }
+
+    // Real weekly activity timeline
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const daysMap: Record<string, { count: number; value: number }> = {
+      Mon: { count: 0, value: 0 },
+      Tue: { count: 0, value: 0 },
+      Wed: { count: 0, value: 0 },
+      Thu: { count: 0, value: 0 },
+      Fri: { count: 0, value: 0 },
+      Sat: { count: 0, value: 0 },
+      Sun: { count: 0, value: 0 },
+    };
+
+    let hasWeeklyData = false;
+    for (const r of userRows) {
+      const dateStr = r['Servicing Date'] || r['date'];
+      if (dateStr) {
+        const d = new Date(dateStr);
+        if (!isNaN(d.getTime())) {
+          const dayIndex = (d.getDay() + 6) % 7; // Mon=0 .. Sun=6
+          const dayName = days[dayIndex];
+          const val = getServedAmountOfRow(r);
+          daysMap[dayName].count += 1;
+          daysMap[dayName].value += val;
+          hasWeeklyData = true;
+        }
+      }
+    }
+
+    const activityTimeline = hasWeeklyData
+      ? days.map(d => ({ date: d, count: daysMap[d].count, value: daysMap[d].value }))
+      : [];
+
+    // Real monthly performance trend
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthlyVolumes: Record<string, number> = {};
+    for (const r of userRows) {
+      const dateStr = r['Servicing Date'] || r['date'];
+      if (dateStr) {
+        const d = new Date(dateStr);
+        if (!isNaN(d.getTime())) {
+          const mKey = monthNames[d.getMonth()];
+          monthlyVolumes[mKey] = (monthlyVolumes[mKey] || 0) + getServedAmountOfRow(r);
+        }
+      }
+    }
+
+    const presentMonths = Object.keys(monthlyVolumes);
+    const maxMonthlyVol = Math.max(...Object.values(monthlyVolumes), 0);
+
+    const performanceTrend = presentMonths.length > 0
+      ? presentMonths.map(m => ({
+          date: m,
+          rate: maxMonthlyVol > 0 ? Math.round((monthlyVolumes[m] / maxMonthlyVol) * 100) : 0
+        }))
+      : [];
 
     return {
       todayTransactions: todayTxCount,
@@ -990,14 +1013,25 @@ export default function PeopleManagementView({
 
   // --- SVG CHART RENDERERS (CUSTOM TO PREVENT CONFLICTS IN REACT 19) ---
   const renderAreaChart = (data: { date: string; value: number }[]) => {
-    if (!data || data.length === 0) return null;
+    if (!data || data.length === 0 || data.every(d => d.value === 0)) {
+      return (
+        <div className="py-6 text-center text-[11px] font-bold text-slate-400 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+          No activity recorded this week
+        </div>
+      );
+    }
     const maxVal = Math.max(...data.map(d => d.value)) || 1;
     const width = 500;
     const height = 140;
     const padding = 20;
 
+    const getX = (idx: number) => {
+      if (data.length <= 1) return width / 2;
+      return padding + (idx * (width - padding * 2)) / (data.length - 1);
+    };
+
     const points = data.map((d, idx) => {
-      const x = padding + (idx * (width - padding * 2)) / (data.length - 1);
+      const x = getX(idx);
       const y = height - padding - (d.value * (height - padding * 2)) / maxVal;
       return `${x},${y}`;
     }).join(' ');
@@ -1024,7 +1058,7 @@ export default function PeopleManagementView({
         
         {/* Tooltip circles */}
         {data.map((d, idx) => {
-          const x = padding + (idx * (width - padding * 2)) / (data.length - 1);
+          const x = getX(idx);
           const y = height - padding - (d.value * (height - padding * 2)) / maxVal;
           return (
             <g key={idx} className="group/dot">
@@ -1038,7 +1072,7 @@ export default function PeopleManagementView({
 
         {/* Labels */}
         {data.map((d, idx) => {
-          const x = padding + (idx * (width - padding * 2)) / (data.length - 1);
+          const x = getX(idx);
           return (
             <text key={idx} x={x} y={height - 4} className="text-[9px] font-bold font-sans fill-slate-400" textAnchor="middle">
               {d.date}
@@ -1050,15 +1084,26 @@ export default function PeopleManagementView({
   };
 
   const renderTrendLine = (data: { date: string; rate: number }[]) => {
-    if (!data || data.length === 0) return null;
+    if (!data || data.length === 0 || data.every(d => d.rate === 0)) {
+      return (
+        <div className="py-6 text-center text-[11px] font-bold text-slate-400 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+          No performance trend recorded
+        </div>
+      );
+    }
     const maxVal = 100;
-    const minVal = 50;
+    const minVal = 0;
     const width = 500;
     const height = 120;
     const padding = 20;
 
+    const getX = (idx: number) => {
+      if (data.length <= 1) return width / 2;
+      return padding + (idx * (width - padding * 2)) / (data.length - 1);
+    };
+
     const points = data.map((d, idx) => {
-      const x = padding + (idx * (width - padding * 2)) / (data.length - 1);
+      const x = getX(idx);
       const y = height - padding - ((d.rate - minVal) * (height - padding * 2)) / (maxVal - minVal);
       return `${x},${y}`;
     }).join(' ');
@@ -1066,7 +1111,7 @@ export default function PeopleManagementView({
     return (
       <svg className="w-full h-[120px]" viewBox={`0 0 ${width} ${height}`}>
         {/* Horizontal grid lines */}
-        {[50, 75, 100].map((v, i) => {
+        {[0, 50, 100].map((v, i) => {
           const y = height - padding - ((v - minVal) * (height - padding * 2)) / (maxVal - minVal);
           return (
             <g key={i}>
@@ -1081,7 +1126,7 @@ export default function PeopleManagementView({
 
         {/* Dots */}
         {data.map((d, idx) => {
-          const x = padding + (idx * (width - padding * 2)) / (data.length - 1);
+          const x = getX(idx);
           const y = height - padding - ((d.rate - minVal) * (height - padding * 2)) / (maxVal - minVal);
           return (
             <circle key={idx} cx={x} cy={y} r="3.5" className="fill-sky-500 stroke-white stroke-2" />
@@ -1090,7 +1135,7 @@ export default function PeopleManagementView({
 
         {/* X Axis Labels */}
         {data.map((d, idx) => {
-          const x = padding + (idx * (width - padding * 2)) / (data.length - 1);
+          const x = getX(idx);
           return (
             <text key={idx} x={x} y={height - 2} className="text-[9px] font-bold font-sans fill-slate-400" textAnchor="middle">
               {d.date}
@@ -1753,7 +1798,7 @@ export default function PeopleManagementView({
                 <div className="flex justify-between items-center">
                   <h4 className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Daily MGT Performance Indicators</h4>
                   <span className="text-[10px] bg-indigo-50 text-indigo-700 font-black font-mono px-2 py-0.5 rounded">
-                    RANKING: #{selectedProfile.metrics.ranking}
+                    RANKING: {selectedProfile.metrics.ranking > 0 ? `#${selectedProfile.metrics.ranking}` : 'N/A'}
                   </span>
                 </div>
 
@@ -1801,22 +1846,28 @@ export default function PeopleManagementView({
               {/* Recent Transactions List */}
               <div className="p-5 space-y-4">
                 <h4 className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Authorized Ledger Record Ingestion</h4>
-                <div className="space-y-2">
-                  {selectedProfile.metrics.recentTransactions.map((tx: any) => (
-                    <div key={tx.id} className="flex justify-between items-center p-2.5 bg-brand-bg/50 border border-slate-100 rounded-xl">
-                      <div>
-                        <span className="font-extrabold text-slate-800 block text-[11px]">{tx.type}</span>
-                        <span className="text-[10px] text-slate-400 font-mono font-bold">{tx.id}</span>
+                {selectedProfile.metrics.recentTransactions.length === 0 ? (
+                  <div className="py-6 text-center text-[11px] font-bold text-slate-400 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+                    No recent transactions recorded
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {selectedProfile.metrics.recentTransactions.map((tx: any) => (
+                      <div key={tx.id} className="flex justify-between items-center p-2.5 bg-brand-bg/50 border border-slate-100 rounded-xl">
+                        <div>
+                          <span className="font-extrabold text-slate-800 block text-[11px]">{tx.type}</span>
+                          <span className="text-[10px] text-slate-400 font-mono font-bold">{tx.id}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="font-bold text-slate-900 font-mono block text-[11px]">
+                            TZS {tx.amount.toLocaleString()}
+                          </span>
+                          <span className="text-[9px] text-emerald-600 font-bold uppercase">{tx.status}</span>
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <span className="font-bold text-slate-900 font-mono block text-[11px]">
-                          TZS {tx.amount.toLocaleString()}
-                        </span>
-                        <span className="text-[9px] text-emerald-600 font-bold uppercase">{tx.status}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
             </motion.div>

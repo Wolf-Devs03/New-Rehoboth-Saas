@@ -252,7 +252,6 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
   const [lastClassificationSummary, setLastClassificationSummary] = useState<{
     SA_INTERNAL: { count: number; volume: number };
     BASE: { count: number; volume: number };
-    BASE_CROSS_OWNER: { count: number; volume: number };
     IOP: { count: number; volume: number };
   } | null>(() => {
     try {
@@ -718,7 +717,6 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
       const monthlyTargetKeys = ['total monthly target', 'monthly target', 'target', 'total target'];
       const achievedKeys = ['total actual', 'actual', 'achieved', 'total achieved'];
       const percentageKeys = ['achievement', 'achievement percentage', 'percentage', '% achieved', 'achieved %'];
-      const penaltyKeys = ['cp servicing val', 'cp_servicing_val', 'penalty', 'servicing penalty'];
 
       const masterOwners = getMasterOwners();
       const currentDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -742,7 +740,6 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
         let rawMonthlyTarget = '';
         let rawAchieved = '';
         let rawPercentage = '';
-        let rawPenalty = '';
 
         for (const k of Object.keys(row)) {
           const cleanK = k.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -773,11 +770,6 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
               if (cleanK === t.replace(/[^a-z0-9]/g, '')) { rawPercentage = val; break; }
             }
           }
-          if (!rawPenalty) {
-            for (const t of penaltyKeys) {
-              if (cleanK === t.replace(/[^a-z0-9]/g, '')) { rawPenalty = val; break; }
-            }
-          }
         }
 
         if (!rawOwner) continue; // a target row with no owner name is unusable, skip it
@@ -799,7 +791,6 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
             monthlyTarget,
             achievedValue,
             achievementPercentage,
-            penaltyValue: parseNum(rawPenalty),
             period: agentTargetPeriod,
             importedAt: currentDate,
           },
@@ -3857,7 +3848,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                     {/* SA_INTERNAL */}
                     <div className="bg-white dark:bg-slate-800 border border-rose-200 dark:border-rose-900/40 rounded-xl p-3.5 space-y-1.5 shadow-xs">
                       <div className="flex justify-between items-center">
@@ -3887,22 +3878,6 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                           TZS {(summary.BASE?.volume || 0).toLocaleString()}
                         </div>
                         <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">Registered owner match</p>
-                      </div>
-                    </div>
-
-                    {/* BASE_CROSS_OWNER */}
-                    <div className="bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-900/40 rounded-xl p-3.5 space-y-1.5 shadow-xs">
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-100 dark:border-amber-900/50">
-                          Base Cross-Owner
-                        </span>
-                        <span className="text-xs font-mono font-bold text-slate-600 dark:text-slate-300">{(summary.BASE_CROSS_OWNER?.count || 0).toLocaleString()} rows</span>
-                      </div>
-                      <div>
-                        <div className="text-sm font-black text-slate-900 dark:text-white font-mono">
-                          TZS {(summary.BASE_CROSS_OWNER?.volume || 0).toLocaleString()}
-                        </div>
-                        <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">Cross-owner servicing</p>
                       </div>
                     </div>
 

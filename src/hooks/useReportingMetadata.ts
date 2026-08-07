@@ -17,7 +17,7 @@ export function useReportingMetadata() {
     const loadMetadata = async () => {
       try {
         const rows = await getDailyServicingRows();
-        const { reportingMonth, lastUpload } = calculateCompanyKPIs(rows);
+        const { reportingMonth, lastUpload } = await calculateCompanyKPIs(rows);
         if (isMounted) {
           setMetadata({ reportingMonth, lastUpload });
         }

@@ -256,7 +256,7 @@ export default function Header({
       case ViewType.DASHBOARD:
         return [
           { label: 'Executive Portal', view: ViewType.DASHBOARD },
-          { label: 'Executive Dashboard', active: true }
+          { label: 'Admin Dashboard', active: true }
         ];
       case ViewType.PEOPLE_MGT:
         return [

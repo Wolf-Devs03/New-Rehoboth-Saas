@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Circle, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { 
   MapPin, 
   Navigation, 
-  Upload, 
   Trash2, 
   Camera, 
   Loader2, 
@@ -15,8 +14,7 @@ import {
   AlertCircle,
   Search,
   X,
-  Crosshair,
-  UserCheck
+  RefreshCw
 } from 'lucide-react';
 import { Owner, WakalaEntry } from '../types';
 import { savePhoto, getPhotosByOwner, deletePhoto, WorkPhoto } from '../utils/db';
@@ -109,15 +107,25 @@ export default function WorkLocationSection({
   const [mapSearchQuery, setMapSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
 
-  // Photos State
+  // Photos & Live Camera State
   const [photos, setPhotos] = useState<WorkPhoto[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
+
+  type CameraState = 'idle' | 'initializing' | 'active' | 'no-camera' | 'permission-denied' | 'captured';
+  const [cameraState, setCameraState] = useState<CameraState>('idle');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
+  const [isSavingPhoto, setIsSavingPhoto] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // Load photos from IndexedDB
   const loadPhotos = async () => {
     try {
-      const loadedPhotos = await getPhotosByOwner(localOwner.id || localOwner.name);
+      const ownerKey = localOwner?.id || localOwner?.name;
+      if (!ownerKey) return;
+      const loadedPhotos = await getPhotosByOwner(ownerKey);
       setPhotos(loadedPhotos);
     } catch (err) {
       console.error('Failed to load photos from IndexedDB:', err);
@@ -126,11 +134,11 @@ export default function WorkLocationSection({
 
   useEffect(() => {
     loadPhotos();
-  }, [localOwner.id, localOwner.name]);
+  }, [localOwner?.id, localOwner?.name]);
 
   // Compute Wakala Pins
-  const baseWakalas = localOwner.baseWakalas || [];
-  const iopWakalas = localOwner.iopWakalas || [];
+  const baseWakalas = localOwner?.baseWakalas || [];
+  const iopWakalas = localOwner?.iopWakalas || [];
 
   const getWakalaCoordinates = (w: WakalaEntry, index: number): { lat: number; lng: number; isCaptured: boolean } => {
     if (w.location && typeof w.location.lat === 'number' && typeof w.location.lng === 'number') {
@@ -291,58 +299,135 @@ export default function WorkLocationSection({
     );
   };
 
-  // Convert File to Base64 string for DB storage
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (err) => reject(err);
-    });
+  // Stop active video stream tracks
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
   };
 
-  // Handle image upload from camera/file
-  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  // Start live camera feed using getUserMedia
+  const startCamera = async () => {
+    stopCameraStream();
+    setCameraError(null);
+    setCapturedFrame(null);
+    setCameraState('initializing');
 
-    setIsUploading(true);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraState('no-camera');
+      setCameraError('Camera-equipped device required. Live camera hardware is not available or supported in this browser environment.');
+      return;
+    }
+
+    try {
+      let stream: MediaStream;
+      try {
+        // Request rear/environment camera first for proof of work location
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } }
+        });
+      } catch (envErr) {
+        // Fallback to any available video stream if environment constraint fails
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
+
+      streamRef.current = stream;
+      setCameraState('active');
+    } catch (err: any) {
+      console.error('Camera access error:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setCameraState('permission-denied');
+        setCameraError('Camera permission was denied. Please enable camera permissions in your browser or device settings to capture real-time workplace photo evidence.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setCameraState('no-camera');
+        setCameraError('Camera-equipped device required. No camera hardware was detected on this device.');
+      } else {
+        setCameraState('no-camera');
+        setCameraError(`Camera unavailable: ${err.message || 'Unable to access camera device.'}`);
+      }
+    }
+  };
+
+  // Close live camera stream panel
+  const closeCamera = () => {
+    stopCameraStream();
+    setCapturedFrame(null);
+    setCameraState('idle');
+    setCameraError(null);
+  };
+
+  // Capture current video frame onto offscreen canvas and export as base64
+  const captureFrame = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    const width = video.videoWidth || 640;
+    const height = video.videoHeight || 480;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, width, height);
+    const base64Data = canvas.toDataURL('image/jpeg', 0.85);
+
+    setCapturedFrame(base64Data);
+    setCameraState('captured');
+    stopCameraStream();
+  };
+
+  // Confirm captured frame and write to IndexedDB WorkPhoto store
+  const handleConfirmCapturedPhoto = async () => {
+    if (!capturedFrame) return;
+
+    setIsSavingPhoto(true);
     setPhotoError(null);
 
     try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        if (!file.type.startsWith('image/')) {
-          throw new Error('Unsupported format. Please upload valid image files only.');
-        }
+      const ownerKey = localOwner?.id || localOwner?.name;
+      if (!ownerKey) return;
+      // Save base64 string directly into existing WorkPhoto storage
+      const photoId = await savePhoto(ownerKey, capturedFrame);
 
-        // Limit to 5MB to ensure stable DB write and app responsiveness
-        if (file.size > 5 * 1024 * 1024) {
-          throw new Error('File size exceeds the 5MB limit.');
-        }
+      const currentPhotoIds = localOwner?.workPhotoIds ?? [];
+      const updatedPhotoIds = [...currentPhotoIds, photoId];
 
-        const base64 = await fileToBase64(file);
-        const photoId = await savePhoto(localOwner.id || localOwner.name, base64);
+      const updatedOwner: Owner = {
+        ...localOwner,
+        workPhotoIds: updatedPhotoIds
+      };
 
-        const currentPhotoIds = localOwner.workPhotoIds ?? [];
-        const updatedPhotoIds = [...currentPhotoIds, photoId];
-
-        const updatedOwner: Owner = {
-          ...localOwner,
-          workPhotoIds: updatedPhotoIds
-        };
-
-        onUpdateOwner(updatedOwner);
-      }
-      
+      onUpdateOwner(updatedOwner);
       await loadPhotos();
+      closeCamera();
     } catch (err: any) {
       setPhotoError(err.message ?? 'An error occurred during photo saving.');
     } finally {
-      setIsUploading(false);
-      if (e.target) e.target.value = ''; // Reset file input
+      setIsSavingPhoto(false);
     }
   };
+
+  // Attach stream to video element when camera active
+  useEffect(() => {
+    if (cameraState === 'active' && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(err => {
+        console.warn('Error playing live camera stream:', err);
+      });
+    }
+  }, [cameraState]);
+
+  // Cleanup camera stream on unmount
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, []);
 
   // Handle photo deletion
   const handleDeletePhoto = async (photoId: string) => {
@@ -707,27 +792,193 @@ export default function WorkLocationSection({
           </div>
 
           {isEditable && (
-            <label className={`flex items-center gap-2 rounded-lg border border-brand-primary/20 bg-brand-primary-container/20 px-4 py-2 font-sans text-xs font-bold text-brand-primary hover:bg-brand-primary-container/40 transition-all cursor-pointer ${
-              isUploading ? 'opacity-50 pointer-events-none' : ''
-            }`}>
-              {isUploading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Camera className="h-4 w-4" />
-              )}
-              {isUploading ? 'Saving Photo...' : 'Capture / Upload Photo'}
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                onChange={handlePhotoUpload}
-                disabled={isUploading}
-                multiple
-              />
-            </label>
+            <button
+              type="button"
+              onClick={startCamera}
+              className="flex items-center gap-2 rounded-lg border border-brand-primary/20 bg-brand-primary-container/20 px-4 py-2 font-sans text-xs font-bold text-brand-primary hover:bg-brand-primary-container/40 transition-all cursor-pointer shrink-0"
+            >
+              <Camera className="h-4 w-4" />
+              Take Live Workplace Photo
+            </button>
           )}
         </div>
+
+        {/* Live Camera Interface Panel */}
+        {cameraState !== 'idle' && (
+          <div className="mb-6 p-4 sm:p-6 rounded-2xl border-2 border-brand-primary/30 bg-slate-900 text-white shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-700/80 pb-3">
+              <div className="flex items-center gap-2">
+                <Camera className="h-5 w-5 text-brand-primary-light" />
+                <h4 className="font-sans text-sm font-bold text-white">
+                  Live Workplace Proof Capture
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={closeCamera}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Close Camera"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* State 1: Initializing */}
+            {cameraState === 'initializing' && (
+              <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
+                <Loader2 className="h-8 w-8 text-brand-primary animate-spin" />
+                <p className="font-sans text-xs text-slate-300 font-medium">
+                  Initializing live camera stream...
+                </p>
+              </div>
+            )}
+
+            {/* State 2: No Camera Available */}
+            {cameraState === 'no-camera' && (
+              <div className="p-4 rounded-xl bg-rose-950/60 border border-rose-800/80 space-y-3">
+                <div className="flex items-center gap-2.5 text-rose-300 font-bold text-sm">
+                  <AlertCircle className="h-5 w-5 shrink-0 text-rose-400" />
+                  <span>Camera-Equipped Device Required</span>
+                </div>
+                <p className="font-sans text-xs text-rose-200 leading-relaxed">
+                  {cameraError || 'No live camera detected. A camera-equipped device is strictly required to capture real-time workplace photo evidence.'}
+                </p>
+                <div className="p-2.5 rounded-lg bg-rose-900/40 border border-rose-800/50 text-[11px] text-rose-300 font-mono">
+                  ⚠️ Pre-existing file uploads and gallery submissions are disabled to guarantee authentic proof-of-presence.
+                </div>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={closeCamera}
+                    className="px-4 py-2 rounded-lg bg-slate-800 text-slate-200 text-xs font-bold hover:bg-slate-700 transition-all cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* State 3: Permission Denied */}
+            {cameraState === 'permission-denied' && (
+              <div className="p-4 rounded-xl bg-amber-950/60 border border-amber-800/80 space-y-3">
+                <div className="flex items-center gap-2.5 text-amber-300 font-bold text-sm">
+                  <AlertCircle className="h-5 w-5 shrink-0 text-amber-400" />
+                  <span>Camera Access Permission Denied</span>
+                </div>
+                <p className="font-sans text-xs text-amber-200 leading-relaxed">
+                  {cameraError || 'Camera access was denied by your browser settings. Please grant camera permission to proceed.'}
+                </p>
+                <div className="pt-2 flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={startCamera}
+                    className="px-4 py-2 rounded-lg bg-amber-600 text-white text-xs font-bold hover:bg-amber-500 transition-all cursor-pointer flex items-center gap-1.5"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Retry Camera Access
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeCamera}
+                    className="px-4 py-2 rounded-lg bg-slate-800 text-slate-200 text-xs font-bold hover:bg-slate-700 transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* State 4: Active Live Stream Feed */}
+            {cameraState === 'active' && (
+              <div className="space-y-4">
+                <div className="relative aspect-video w-full rounded-xl overflow-hidden bg-black border border-slate-800 flex items-center justify-center">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute inset-0 pointer-events-none border-2 border-dashed border-white/20 rounded-xl m-4 flex items-center justify-center">
+                    <div className="text-[10px] text-white/50 font-mono bg-black/40 px-2.5 py-1 rounded backdrop-blur">
+                      LIVE CAMERA FEED
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                  <span className="text-[11px] text-slate-400 font-sans">
+                    Point camera at the Wakala work location and click capture.
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={closeCamera}
+                      className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold hover:bg-slate-700 transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={captureFrame}
+                      className="px-5 py-2.5 rounded-xl bg-brand-primary text-white text-xs font-bold hover:bg-brand-primary-light transition-all cursor-pointer flex items-center gap-2 shadow-lg"
+                    >
+                      <Camera className="h-4 w-4" />
+                      Capture Frame
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* State 5: Successful Capture Preview & Confirmation */}
+            {cameraState === 'captured' && capturedFrame && (
+              <div className="space-y-4">
+                <div className="relative aspect-video w-full rounded-xl overflow-hidden bg-black border border-emerald-500/50 shadow-inner">
+                  <img
+                    src={capturedFrame}
+                    alt="Captured workplace preview"
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute top-3 left-3 bg-emerald-600 text-white font-sans text-[10px] font-bold px-2.5 py-1 rounded-full shadow flex items-center gap-1.5">
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    Captured Frame Preview
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                  <span className="text-[11px] text-slate-300 font-sans">
+                    Please confirm the captured frame before submitting to owner records.
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={startCamera}
+                      disabled={isSavingPhoto}
+                      className="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-200 text-xs font-bold hover:bg-slate-700 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Retake
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmCapturedPhoto}
+                      disabled={isSavingPhoto}
+                      className="px-5 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-500 transition-all cursor-pointer flex items-center gap-2 shadow-lg disabled:opacity-50"
+                    >
+                      {isSavingPhoto ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <CheckCircle className="h-4 w-4" />
+                      )}
+                      {isSavingPhoto ? 'Saving Photo...' : 'Confirm & Submit Photo'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {photoError && (
           <div className="p-3 mb-4 rounded-xl border border-rose-200 bg-rose-50 text-rose-800 text-xs font-bold font-sans flex items-center gap-2">
@@ -741,11 +992,11 @@ export default function WorkLocationSection({
           <div className="text-center py-12 border border-dashed border-brand-gray-border rounded-xl">
             <ImageIcon className="h-8 w-8 text-brand-text-variant/30 mx-auto mb-2" />
             <p className="font-sans text-xs text-brand-text-variant">
-              No workplace photos uploaded yet.
+              No workplace photos captured yet.
             </p>
             {isEditable && (
               <p className="font-sans text-[10px] text-brand-text-variant/70 mt-1">
-                Click the button above to add verification pictures of your work area.
+                Click "Take Live Workplace Photo" above to capture live camera proof of your work area.
               </p>
             )}
           </div>

@@ -254,7 +254,8 @@ export default function DailyMgtMappingEngine({
 
       // 3. Update Owners List with new aggregated daily/weekly status & performance
       const updatedOwners = currentOwners.map(o => {
-        const ownerSum = ownerSummaries.find(os => os.name.toLowerCase() === o.name.toLowerCase());
+        if (!o || !o.name) return o;
+        const ownerSum = ownerSummaries.find(os => os && os.name && os.name.toLowerCase() === o.name.toLowerCase());
         if (ownerSum && ownerSum.transactionsCount > 0) {
           return {
             ...o,
@@ -277,7 +278,8 @@ export default function DailyMgtMappingEngine({
 
       // 4. Update Personnel List
       const updatedPersonnel = currentPersonnel.map(p => {
-        const pSum = personnelSummaries.find(ps => ps.name.toLowerCase() === p.name.toLowerCase());
+        if (!p || !p.name) return p;
+        const pSum = personnelSummaries.find(ps => ps && ps.name && ps.name.toLowerCase() === p.name.toLowerCase());
         if (pSum && pSum.transactionsCount > 0) {
           return {
             ...p,
@@ -576,7 +578,7 @@ export default function DailyMgtMappingEngine({
                               </span>
                               <OwnerAvatar 
                                 ownerName={item.name} 
-                                avatarPhotoId={currentOwners.find(o => o.name.toLowerCase() === item.name.toLowerCase() || o.id === item.id)?.avatarPhotoId} 
+                                avatarPhotoId={currentOwners.find(o => o && ((o.name && item.name && o.name.toLowerCase() === item.name.toLowerCase()) || (o.id && item.id && o.id === item.id)))?.avatarPhotoId} 
                                 className="h-8 w-8 rounded-lg object-cover" 
                               />
                               <div>
@@ -664,7 +666,7 @@ export default function DailyMgtMappingEngine({
                             <div className="flex items-center gap-3">
                               <OwnerAvatar 
                                 ownerName={item.name} 
-                                avatarPhotoId={currentOwners.find(o => o.name.toLowerCase() === item.name.toLowerCase() || o.id === item.id)?.avatarPhotoId} 
+                                avatarPhotoId={currentOwners.find(o => o && ((o.name && item.name && o.name.toLowerCase() === item.name.toLowerCase()) || (o.id && item.id && o.id === item.id)))?.avatarPhotoId} 
                                 className="h-8 w-8 rounded-lg object-cover" 
                               />
                               <span className="font-bold text-brand-text">{item.name}</span>

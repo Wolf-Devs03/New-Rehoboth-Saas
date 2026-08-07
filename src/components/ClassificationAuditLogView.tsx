@@ -106,7 +106,6 @@ export default function ClassificationAuditLogView() {
       totalVolume: 0,
       SA_INTERNAL: { count: 0, volume: 0 },
       BASE: { count: 0, volume: 0 },
-      BASE_CROSS_OWNER: { count: 0, volume: 0 },
       IOP: { count: 0, volume: 0 }
     };
 
@@ -191,7 +190,7 @@ export default function ClassificationAuditLogView() {
       </div>
 
       {/* METRICS DASHBOARD */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Total Audit Logs */}
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-col justify-between">
           <div className="flex items-center justify-between text-slate-500">
@@ -238,22 +237,6 @@ export default function ClassificationAuditLogView() {
           </div>
         </div>
 
-        {/* BASE CROSS OWNER */}
-        <div className="bg-amber-50/70 p-4 rounded-2xl border border-amber-200 shadow-xs flex flex-col justify-between">
-          <div className="flex items-center justify-between text-amber-800">
-            <span className="text-xs font-bold uppercase tracking-wider">Cross Owner</span>
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-200 text-amber-900">
-              Cross
-            </span>
-          </div>
-          <div className="mt-3">
-            <span className="text-2xl font-extrabold text-amber-950">{metrics.BASE_CROSS_OWNER.count.toLocaleString()}</span>
-            <span className="block text-[11px] text-amber-800 font-semibold mt-0.5">
-              TZS {metrics.BASE_CROSS_OWNER.volume.toLocaleString()}
-            </span>
-          </div>
-        </div>
-
         {/* IOP */}
         <div className="bg-purple-50/70 p-4 rounded-2xl border border-purple-200 shadow-xs flex flex-col justify-between">
           <div className="flex items-center justify-between text-purple-800">
@@ -294,7 +277,6 @@ export default function ClassificationAuditLogView() {
             <option value="ALL">All Classification Buckets</option>
             <option value="SA_INTERNAL">SA_INTERNAL</option>
             <option value="BASE">BASE</option>
-            <option value="BASE_CROSS_OWNER">BASE_CROSS_OWNER</option>
             <option value="IOP">IOP</option>
           </select>
 
@@ -335,8 +317,6 @@ export default function ClassificationAuditLogView() {
                       ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
                       : log.classificationBucket === 'BASE'
                       ? 'bg-blue-100 text-blue-800 border-blue-300'
-                      : log.classificationBucket === 'BASE_CROSS_OWNER'
-                      ? 'bg-amber-100 text-amber-800 border-amber-300'
                       : 'bg-purple-100 text-purple-800 border-purple-300';
 
                   return (
@@ -501,8 +481,8 @@ function getMockAuditLogs(): ClassificationAuditRecord[] {
       ownerId: 'OWNER-BALWYN',
       matchedEntityId: 'TERM-994821',
       matchedEntityType: 'BASE_WAKALA',
-      classificationBucket: 'BASE_CROSS_OWNER',
-      ruleTriggered: 'Matched Base Wakala (Cross-Owner Match)'
+      classificationBucket: 'BASE',
+      ruleTriggered: 'Matched Base Wakala (Serviced By Different Owner — Credited To Servicer)'
     },
     {
       id: 'audit-tx-1004',

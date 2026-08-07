@@ -1,6 +1,8 @@
 import { Owner, Personnel, AgentTarget } from '../types';
 import { getClassifiedRowsCached } from './classificationCache';
-import { getDailyServicingRows, saveDailyServicingData } from './indexedDB';
+import { getDailyServicingRows, saveDailyServicingData, getServicingRows } from './indexedDB';
+import { normalizeMsisdn } from './msisdn';
+import { resolveOwnerMatch } from './ownerMatch';
 
 export interface Till {
   id: string;
@@ -301,15 +303,15 @@ export function mapTransactions(
 
       // Classify whether the assigned person is an Owner or a Personnel
       const matchedOwner = currentOwners.find(
-        (o) => o.name.toLowerCase() === assignedPersonName.toLowerCase()
+        (o) => o && o.name && o.name.toLowerCase() === assignedPersonName.toLowerCase()
       );
       const matchedPersonnel = currentPersonnel.find(
-        (p) => p.name.toLowerCase() === assignedPersonName.toLowerCase()
+        (p) => p && p.name && p.name.toLowerCase() === assignedPersonName.toLowerCase()
       );
 
       if (matchedOwner) {
         personType = 'Owner';
-        assignedPersonId = matchedOwner.masterAgentId;
+        assignedPersonId = matchedOwner.masterAgentId || matchedOwner.id || 'MA-UNKNOWN';
       } else if (matchedPersonnel) {
         personType = 'Personnel';
         assignedPersonId = matchedPersonnel.id || 'MA-UNKNOWN';
@@ -448,7 +450,9 @@ export function generateOwnerSummaries(
           const tsA = getTimestampEpoch(a.timestamp || a.date || '');
           const tsB = getTimestampEpoch(b.timestamp || b.date || '');
           if (tsA !== tsB) return tsA - tsB;
-          return a.id.localeCompare(b.id);
+          const idA = (a?._id || a?.id || a?.['Receipt No'] || a?.['Receipt_No'] || '').toString();
+          const idB = (b?._id || b?.id || b?.['Receipt No'] || b?.['Receipt_No'] || '').toString();
+          return idA.localeCompare(idB);
         });
 
         const earliest = sorted[0];
@@ -538,7 +542,9 @@ export function generatePersonnelSummaries(
           const tsA = getTimestampEpoch(a.timestamp || a.date || '');
           const tsB = getTimestampEpoch(b.timestamp || b.date || '');
           if (tsA !== tsB) return tsA - tsB;
-          return a.id.localeCompare(b.id);
+          const idA = (a?._id || a?.id || a?.['Receipt No'] || a?.['Receipt_No'] || '').toString();
+          const idB = (b?._id || b?.id || b?.['Receipt No'] || b?.['Receipt_No'] || '').toString();
+          return idA.localeCompare(idB);
         });
 
         const earliest = sorted[0];
@@ -838,6 +844,7 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
   const tillToPeopleMap: { [till: string]: { name: string, type: 'Owner' | 'Personnel', id: string }[] } = {};
 
   ownersList.forEach((o: any) => {
+    if (!o || !o.name) return;
     const tills = o.assignedTills || [];
     tills.forEach((t: string) => {
       const cleaned = String(t).trim();
@@ -845,22 +852,23 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
         if (!tillToPeopleMap[cleaned]) {
           tillToPeopleMap[cleaned] = [];
         }
-        if (!tillToPeopleMap[cleaned].some(p => p.name.toLowerCase() === o.name.toLowerCase())) {
-          tillToPeopleMap[cleaned].push({ name: o.name, type: 'Owner', id: o.id });
+        if (!tillToPeopleMap[cleaned].some(p => p.name && p.name.toLowerCase() === o.name.toLowerCase())) {
+          tillToPeopleMap[cleaned].push({ name: o.name, type: 'Owner', id: o.id || '' });
         }
       }
     });
   });
 
   personnelList.forEach((p: any) => {
+    if (!p || !p.name) return;
     const tillStr = p.assignedTill || '';
     const tills = tillStr.split(',').map((t: string) => String(t).trim()).filter(Boolean);
     tills.forEach((t: string) => {
       if (!tillToPeopleMap[t]) {
         tillToPeopleMap[t] = [];
       }
-      if (!tillToPeopleMap[t].some(person => person.name.toLowerCase() === p.name.toLowerCase())) {
-        tillToPeopleMap[t].push({ name: p.name, type: 'Personnel', id: p.id });
+      if (!tillToPeopleMap[t].some(person => person.name && person.name.toLowerCase() === p.name.toLowerCase())) {
+        tillToPeopleMap[t].push({ name: p.name, type: 'Personnel', id: p.id || p._id || '' });
       }
     });
   });
@@ -888,10 +896,51 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
 
   localStorage.setItem('duplicateTillAssignments', JSON.stringify(duplicateTillsList));
 
-  // Load agentTargets for penalty mapping
-  const savedTargets = localStorage.getItem('agentTargets');
-  let agentTargets: AgentTarget[] = [];
-  try { agentTargets = savedTargets ? JSON.parse(savedTargets) : []; } catch (e) {}
+  // Load Monthly Servicing Rows for Penalty calculation
+  let monthlyServicingRows: any[] = [];
+  try {
+    monthlyServicingRows = await getServicingRows();
+  } catch (e) {
+    console.error("Failed loading monthly servicing rows in recalculateAllPerformances:", e);
+  }
+
+  // Build Base Wakala MSISDN lookup map
+  const baseWakalaByMsisdn = new Map<string, any>();
+  if (Array.isArray(baseWakalaIndex)) {
+    baseWakalaIndex.forEach(w => {
+      const msisdnKey = normalizeMsisdn(w.msisdn);
+      if (msisdnKey) baseWakalaByMsisdn.set(msisdnKey, w);
+      const altKey = normalizeMsisdn((w as any).altMsisdn || (w as any).alternateNumber);
+      if (altKey) baseWakalaByMsisdn.set(altKey, w);
+    });
+  }
+
+  // Compute penalty per owner
+  const penaltyByOwnerMap: Record<string, number> = {};
+  const penaltyKeys = ['CP_Servicing_Val', 'CP Servicing Val', 'cp_servicing_val', 'CP_Servicing_Value', 'cp_servicing_value', 'penalty', 'Penalty'];
+  monthlyServicingRows.forEach(row => {
+    let penaltyVal = 0;
+    for (const k of penaltyKeys) {
+      if (row[k] !== undefined && row[k] !== null && row[k] !== '') {
+        const v = typeof row[k] === 'number' ? row[k] : parseFloat(String(row[k]).replace(/,/g, '').replace(/[^0-9.-]/g, ''));
+        if (!isNaN(v)) { penaltyVal = v; break; }
+      }
+    }
+    if (penaltyVal !== 0) {
+      const rawMsisdn = String(row.MSISDN || row.msisdn || row.phone || row.Branch_msisdn || '');
+      const normMsisdn = normalizeMsisdn(rawMsisdn);
+      const baseMatch = normMsisdn ? baseWakalaByMsisdn.get(normMsisdn) : undefined;
+      if (baseMatch && baseMatch.ownerName) {
+        const matchResult = resolveOwnerMatch(baseMatch.ownerName, ownersList, 'Penalty Calculation');
+        if (matchResult.matchedOwner) {
+          const ownerId = matchResult.matchedOwner.id;
+          const ownerNameLower = matchResult.matchedOwner.name.toLowerCase();
+          penaltyByOwnerMap[ownerId] = (penaltyByOwnerMap[ownerId] || 0) + penaltyVal;
+          penaltyByOwnerMap[ownerNameLower] = (penaltyByOwnerMap[ownerNameLower] || 0) + penaltyVal;
+        }
+      }
+    }
+  });
 
   // 2. FIRST, reset openingFloat, floatReceived, floatServed, and closingFloat to 0 for all Owners and Personnel
   const resetOwners = ownersList.map((owner: any) => ({
@@ -908,7 +957,7 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
     lowestTx: 0,
     performance: 0,
     penalty: 0,
-    iopBalance: 0,
+    iopVolume: 0,
   }));
 
   const resetPersonnel = personnelList.map((person: any) => ({
@@ -928,21 +977,23 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
 
   // 3. Recompute metrics pure from the deduplicated day's transactions
   const updatedOwners = resetOwners.map((owner: any) => {
-    // 1. Resolve Penalty from monthly targets
-    const ownerTarget = agentTargets.find(t => t.ownerName.toLowerCase() === owner.name.toLowerCase());
-    const penalty = ownerTarget?.penaltyValue || 0;
+    if (!owner) return owner;
+    const ownerId = owner.id || '';
+    const ownerNameLower = (owner.name || '').toLowerCase();
 
-    // 2. Calculate Daily IOP (BASE_CROSS_OWNER bucket)
-    // attributedOwnerName in classifiedRows indicates whose portfolio the wakala belongs to
+    // 1. Resolve Penalty from monthly servicing rows
+    const penalty = (ownerId && penaltyByOwnerMap[ownerId]) || (ownerNameLower && penaltyByOwnerMap[ownerNameLower]) || 0;
+
+    // 2. Calculate IOP Volume (wakala not registered to anyone in the company)
     const iopRows = classifiedRows.filter(c => 
-      c.bucket === 'BASE_CROSS_OWNER' && 
-      c.attributedOwnerName?.toLowerCase() === owner.name.toLowerCase()
+      c.bucket === 'IOP' && 
+      ((ownerId && c.attributedOwnerId === ownerId) || (ownerNameLower && c.attributedOwnerName?.toLowerCase() === ownerNameLower))
     );
-    const iopBalance = iopRows.reduce((acc, c) => acc + Math.abs(getAmountVal(c.row)), 0);
+    const iopVolume = iopRows.reduce((acc, c) => acc + Math.abs(getAmountVal(c.row)), 0);
 
     const assignedTills = Array.isArray(deduplicatedTillsList)
       ? deduplicatedTillsList
-          .filter(t => t.assignedOwner && t.assignedOwner.toLowerCase() === owner.name.toLowerCase())
+          .filter(t => t.assignedOwner && ownerNameLower && t.assignedOwner.toLowerCase() === ownerNameLower)
           .map(t => t.transactionTill || t.id)
       : [];
 
@@ -950,7 +1001,7 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
       const rowName = row['Wakala Owner'] || row['Wakala Name'] || row['Name'] || row['ownerName'] || '';
       const rowTill = row['Branch_msisdn'] || row['transactionTill'] || row['Agent ID'] || row['AgentID'] || '';
       return (
-        rowName.toLowerCase() === owner.name.toLowerCase() ||
+        (ownerNameLower && rowName.toLowerCase() === ownerNameLower) ||
         assignedTills.includes(rowTill)
       );
     });
@@ -959,7 +1010,7 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
       return {
         ...owner,
         penalty,
-        iopBalance,
+        iopVolume,
       };
     }
 
@@ -1014,7 +1065,7 @@ export async function recalculateAllPerformances(providedRows?: any[]): Promise<
       lowestTx,
       avgValue,
       penalty,
-      iopBalance,
+      iopVolume,
       lastSyncDate: new Date().toLocaleDateString('en-US') + ", " + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       status: 'Active'
     };
@@ -1124,14 +1175,17 @@ export interface CompanyKPIsResult {
   mtdFloatServed: number;
   mtdClosingFloat: number;
   totalPenalty: number;
-  totalIop: number;
+  unattributedPenalty: number;
+  penaltyByOwner: Record<string, number>;
+  totalIopVolume: number;
+  iopVolumeByOwner: Record<string, number>;
   reportingMonth: string;
   lastUpload: string;
   latestDay: string;
   earliestDay: string;
 }
 
-export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
+export async function calculateCompanyKPIs(realRows: any[]): Promise<CompanyKPIsResult> {
   const getAmountVal = (row: any) => {
     const val = row['Volume (TZS)'] || row['Volume'] || row['Amount'] || row['value'] || row['volume'] || 0;
     if (typeof val === 'number') return val;
@@ -1156,24 +1210,42 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
     return isNaN(parsed) ? 0 : parsed;
   };
 
+  const getNumVal = (row: any, keys: string[]) => {
+    for (const k of keys) {
+      if (row[k] !== undefined && row[k] !== null && row[k] !== '') {
+        const v = row[k];
+        if (typeof v === 'number') return v;
+        const cleaned = String(v).replace(/,/g, '').replace(/[^0-9.-]/g, '');
+        const parsed = parseFloat(cleaned);
+        if (!isNaN(parsed)) return parsed;
+      }
+    }
+    return 0;
+  };
+
+  const defaultResult: CompanyKPIsResult = {
+    openingFloat: 0,
+    floatReceived: 0,
+    floatServed: 0,
+    closingFloat: 0,
+    mtdOpeningFloat: 0,
+    mtdFloatReceived: 0,
+    mtdFloatServed: 0,
+    mtdClosingFloat: 0,
+    totalPenalty: 0,
+    unattributedPenalty: 0,
+    penaltyByOwner: {},
+    totalIopVolume: 0,
+    iopVolumeByOwner: {},
+    reportingMonth: '—',
+    lastUpload: '—',
+    latestDay: '',
+    earliestDay: ''
+  };
+
   // If empty or invalid, return default metrics
   if (!Array.isArray(realRows) || realRows.length === 0) {
-    return {
-      openingFloat: 0,
-      floatReceived: 0,
-      floatServed: 0,
-      closingFloat: 0,
-      mtdOpeningFloat: 0,
-      mtdFloatReceived: 0,
-      mtdFloatServed: 0,
-      mtdClosingFloat: 0,
-      totalPenalty: 0,
-      totalIop: 0,
-      reportingMonth: '—',
-      lastUpload: '—',
-      latestDay: '',
-      earliestDay: ''
-    };
+    return defaultResult;
   }
 
   // Load reference tables needed for classification
@@ -1205,22 +1277,7 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
   // Get unique dates
   const uniqueDates = Array.from(new Set(realRows.map(r => r['Servicing Date'] || r['date'] || '').filter(Boolean)));
   if (uniqueDates.length === 0) {
-    return {
-      openingFloat: 0,
-      floatReceived: 0,
-      floatServed: 0,
-      closingFloat: 0,
-      mtdOpeningFloat: 0,
-      mtdFloatReceived: 0,
-      mtdFloatServed: 0,
-      mtdClosingFloat: 0,
-      totalPenalty: 0,
-      totalIop: 0,
-      reportingMonth: '—',
-      lastUpload: '—',
-      latestDay: '',
-      earliestDay: ''
-    };
+    return defaultResult;
   }
 
   // Sort dates chronologically
@@ -1282,7 +1339,6 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
   };
 
   // 1. TODAY'S METRICS:
-  // "Opening Float" = Closing Float from the previous day present in the data. If no prior day exists yet, fall back to the earliest balance_before per till/owner for that first day.
   let openingFloat = 0;
   if (uniqueDates.length > 1) {
     const prevDayStr = uniqueDates[uniqueDates.length - 2];
@@ -1292,12 +1348,8 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
   }
 
   const todayRows = billableRealRows.filter(r => (r['Servicing Date'] || r['date'] || '') === todayDateStr);
-  const floatReceived = 0; // No sign-based direction in this model — see design note above
+  const floatReceived = 0;
   const floatServed = todayRows.reduce((acc, row) => acc + Math.abs(getAmountVal(row)), 0);
-
-  // Closing Float now derived purely from the actual balance snapshot,
-  // since openingFloat + received - served no longer applies without a
-  // real received/served split
   const closingFloat = getDayClosingFloat(todayDateStr);
 
   // 2. MONTH TO DATE (MTD) METRICS:
@@ -1305,7 +1357,6 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
   const targetYear = latestDateObj.getFullYear();
   const targetMonth = latestDateObj.getMonth(); // 0-indexed
 
-  // Filter rows within the same calendar month
   const currentMonthBillableRows = billableRealRows.filter(r => {
     const dStr = r['Servicing Date'] || r['date'] || '';
     if (!dStr) return false;
@@ -1323,18 +1374,15 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
   const monthUniqueDates = Array.from(new Set(currentMonthAllRows.map(r => r['Servicing Date'] || r['date'] || '').filter(Boolean)));
   monthUniqueDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
 
-  // MTD Opening Float = Opening Float snapshot from the FIRST day of the current calendar month present in the data (fixed anchor).
   const firstDayOfMonthStr = monthUniqueDates[0] || todayDateStr;
   const mtdOpeningFloat = getDayOpeningFloat(firstDayOfMonthStr);
 
-  const mtdFloatReceived = 0; // No sign-based direction in this model — see design note above
+  const mtdFloatReceived = 0;
 
-  // MTD Float Served = SUM of |unsigned Amounts| across all billable days in the current month so far
   const mtdFloatServed = currentMonthBillableRows.reduce((acc, row) => {
     return acc + Math.abs(getAmountVal(row));
   }, 0);
 
-  // MTD Closing Float = taken from actual balance snapshot at month-end / latest day
   const mtdClosingFloat = getDayClosingFloat(todayDateStr);
 
   // Format Reporting Month (MMM YYYY)
@@ -1348,13 +1396,72 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
   const lastUpload = `${day}/${monthNum}/${yearTwoDigit}`;
 
   // 3. PHASE 4 DERIVED METRICS (Penalty & IOP Ledger)
-  const savedTargets = localStorage.getItem('agentTargets');
-  let agentTargets: AgentTarget[] = [];
-  try { agentTargets = savedTargets ? JSON.parse(savedTargets) : []; } catch (e) {}
-  const totalPenalty = agentTargets.reduce((acc, t) => acc + (t.penaltyValue || 0), 0);
 
-  const iopRowsAll = classifiedAll.filter(c => c.bucket === 'BASE_CROSS_OWNER');
-  const totalIop = iopRowsAll.reduce((acc, c) => acc + Math.abs(getAmountVal(c.row)), 0);
+  // PART A — Compute Penalty correctly
+  let monthlyServicingRows: any[] = [];
+  try {
+    monthlyServicingRows = await getServicingRows(reportingMonth);
+    if (!monthlyServicingRows || monthlyServicingRows.length === 0) {
+      monthlyServicingRows = await getServicingRows();
+    }
+  } catch (e) {
+    console.error("Failed loading monthly servicing rows in calculateCompanyKPIs:", e);
+  }
+
+  const baseWakalaByMsisdn = new Map<string, any>();
+  if (Array.isArray(baseWakalaIndex)) {
+    baseWakalaIndex.forEach(w => {
+      const msisdnKey = normalizeMsisdn(w.msisdn);
+      if (msisdnKey) baseWakalaByMsisdn.set(msisdnKey, w);
+      const altKey = normalizeMsisdn((w as any).altMsisdn || (w as any).alternateNumber);
+      if (altKey) baseWakalaByMsisdn.set(altKey, w);
+    });
+  }
+
+  let totalPenalty = 0;
+  let unattributedPenalty = 0;
+  const penaltyByOwner: Record<string, number> = {};
+
+  const penaltyKeys = ['CP_Servicing_Val', 'CP Servicing Val', 'cp_servicing_val', 'CP_Servicing_Value', 'cp_servicing_value', 'penalty', 'Penalty'];
+
+  monthlyServicingRows.forEach(row => {
+    const penaltyVal = getNumVal(row, penaltyKeys);
+    if (penaltyVal !== 0) {
+      totalPenalty += penaltyVal;
+
+      const rawMsisdn = String(row.MSISDN || row.msisdn || row.phone || row.Phone || row.Branch_msisdn || '');
+      const normMsisdn = normalizeMsisdn(rawMsisdn);
+      const baseMatch = normMsisdn ? baseWakalaByMsisdn.get(normMsisdn) : undefined;
+
+      if (baseMatch && baseMatch.ownerName) {
+        const matchResult = resolveOwnerMatch(baseMatch.ownerName, ownersForClassification, 'Penalty Calculation');
+        const owner = matchResult.matchedOwner;
+        if (owner) {
+          penaltyByOwner[owner.id] = (penaltyByOwner[owner.id] || 0) + penaltyVal;
+          penaltyByOwner[owner.name.toLowerCase()] = (penaltyByOwner[owner.name.toLowerCase()] || 0) + penaltyVal;
+        } else {
+          unattributedPenalty += penaltyVal;
+        }
+      } else {
+        unattributedPenalty += penaltyVal;
+      }
+    }
+  });
+
+  // PART B — IOP Volume (wakala not registered to anyone in the company)
+  const iopVolumeRows = classifiedAll.filter(c => c.bucket === 'IOP');
+  const totalIopVolume = iopVolumeRows.reduce((acc, c) => acc + Math.abs(getAmountVal(c.row)), 0);
+
+  const iopVolumeByOwner: Record<string, number> = {};
+  iopVolumeRows.forEach(c => {
+    const amt = Math.abs(getAmountVal(c.row));
+    if (c.attributedOwnerId) {
+      iopVolumeByOwner[c.attributedOwnerId] = (iopVolumeByOwner[c.attributedOwnerId] || 0) + amt;
+    }
+    if (c.attributedOwnerName) {
+      iopVolumeByOwner[c.attributedOwnerName.toLowerCase()] = (iopVolumeByOwner[c.attributedOwnerName.toLowerCase()] || 0) + amt;
+    }
+  });
 
   return {
     openingFloat,
@@ -1366,7 +1473,10 @@ export function calculateCompanyKPIs(realRows: any[]): CompanyKPIsResult {
     mtdFloatServed,
     mtdClosingFloat,
     totalPenalty,
-    totalIop,
+    unattributedPenalty,
+    penaltyByOwner,
+    totalIopVolume,
+    iopVolumeByOwner,
     reportingMonth,
     lastUpload,
     latestDay: todayDateStr,

@@ -27,6 +27,8 @@ import { calculateCompanyKPIs } from '../utils/mappingEngine';
 import { exportKPIAnalysisToPDF, exportKPIDataToCSV } from '../utils/pdfExport';
 import { getClassifiedRowsCached } from '../utils/classificationCache';
 import { calculateKPI1, KPI1Result } from '../utils/kpiEngine';
+import { calculateKPI2, KPI2Result } from '../utils/kpi2Engine';
+import { getSavedManualOwnerTargets } from '../utils/targetResolution';
 
 // Thresholds for CI:CO ratio classification
 const DEPOSIT_HEAVY_THRESHOLD = 1.2;
@@ -74,13 +76,28 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
   const [baseWakalaLastUpdated, setBaseWakalaLastUpdated] = useState<string | null>(null);
 
   const [kpi1Results, setKpi1Results] = useState<KPI1Result[]>([]);
+  const [kpi2Results, setKpi2Results] = useState<KPI2Result[]>([]);
+  const [hasTargetForPeriod, setHasTargetForPeriod] = useState<boolean>(true);
   const [kpi1Period, setKpi1Period] = useState<string>(() => {
+    const savedTargets = localStorage.getItem('agentTargets');
+    if (savedTargets) {
+      try {
+        const targets: { period?: string }[] = JSON.parse(savedTargets);
+        const periods = targets.map(t => t.period).filter((p): p is string => Boolean(p));
+        if (periods.length > 0) {
+          const sorted = Array.from(new Set(periods)).sort().reverse();
+          return sorted[0];
+        }
+      } catch (e) {
+        console.error('Failed to parse agentTargets for default period:', e);
+      }
+    }
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   });
 
   useEffect(() => {
-    const loadKPI1 = async () => {
+    const loadKPIs = async () => {
       try {
         let rows = await getServicingRows();
         if (!rows || rows.length === 0) {
@@ -91,21 +108,32 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
         const savedTills = localStorage.getItem('tillsList');
         const savedOwners = localStorage.getItem('ownersList');
         const savedTargets = localStorage.getItem('agentTargets');
+        const savedPriority = localStorage.getItem('priorityWakalaList');
 
         const saTillRegistry = savedSaTill ? JSON.parse(savedSaTill) : [];
         const baseWakalaIndex = savedBaseWakala ? JSON.parse(savedBaseWakala) : [];
         const tillsList = savedTills ? JSON.parse(savedTills) : [];
         const owners = savedOwners ? JSON.parse(savedOwners) : [];
         const agentTargets = savedTargets ? JSON.parse(savedTargets) : [];
+        const priorityWakalas = savedPriority ? JSON.parse(savedPriority) : [];
+        const manualTargets = getSavedManualOwnerTargets();
+
+        const matchingTargets = agentTargets.filter((t: any) => t.period === kpi1Period);
+        const hasManualTarget = manualTargets.some(m => m.period === kpi1Period && (m.kpi1BaseTarget !== undefined || m.kpi1IopTarget !== undefined));
+        setHasTargetForPeriod(matchingTargets.length > 0 || hasManualTarget);
 
         const classified = getClassifiedRowsCached(rows as any, saTillRegistry, baseWakalaIndex, tillsList, owners);
-        const results = calculateKPI1(classified, agentTargets, owners, kpi1Period);
-        setKpi1Results(results);
+        
+        const results1 = calculateKPI1(classified, agentTargets, owners, kpi1Period, manualTargets);
+        setKpi1Results(results1);
+
+        const results2 = calculateKPI2(classified, owners, kpi1Period, manualTargets, priorityWakalas);
+        setKpi2Results(results2);
       } catch (e) {
-        console.error('Failed to calculate KPI 1:', e);
+        console.error('Failed to calculate KPIs:', e);
       }
     };
-    loadKPI1();
+    loadKPIs();
   }, [kpi1Period]);
 
   useEffect(() => {
@@ -298,7 +326,7 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
       } else {
         const rows = await getDailyServicingRows();
         if (Array.isArray(rows) && rows.length > 0) {
-          const companyKPIs = calculateCompanyKPIs(rows);
+          const companyKPIs = await calculateCompanyKPIs(rows);
           if (companyKPIs.reportingMonth && companyKPIs.reportingMonth !== '—') {
             activeMonth = companyKPIs.reportingMonth;
           }
@@ -932,21 +960,28 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
         </div>
       </div>
 
-      {/* KPI 1 — Weighted Volume */}
+      {/* KPI 1 — Serviced Volume vs Target */}
       <div className="bg-brand-card p-6 rounded-2xl border border-brand-gray-border shadow-xs space-y-4 mb-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-base font-black text-brand-text">KPI 1 — Weighted Volume</h3>
+            <h3 className="text-base font-black text-brand-text">KPI 1 — Serviced Volume vs Target</h3>
             <p className="text-xs text-brand-text-variant mt-0.5">
-              70% Base Volume / 30% IOP Volume, weighted against each owner's monthly target.
+              Total serviced volume (Base + IOP) against each owner's monthly target.
             </p>
           </div>
-          <input
-            type="month"
-            value={kpi1Period}
-            onChange={(e) => setKpi1Period(e.target.value)}
-            className="text-xs rounded-lg border border-slate-300 px-2 py-1.5"
-          />
+          <div className="flex items-center gap-2">
+            {!hasTargetForPeriod && (
+              <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                No target data uploaded for this period
+              </span>
+            )}
+            <input
+              type="month"
+              value={kpi1Period}
+              onChange={(e) => setKpi1Period(e.target.value)}
+              className="text-xs rounded-lg border border-slate-300 px-2 py-1.5 font-mono"
+            />
+          </div>
         </div>
 
         {kpi1Results.length === 0 ? (
@@ -959,11 +994,10 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
               <thead className="bg-slate-50 text-slate-700 font-extrabold border-b border-slate-200">
                 <tr>
                   <th className="px-4 py-2.5">Owner</th>
-                  <th className="px-4 py-2.5">Base Volume</th>
-                  <th className="px-4 py-2.5">Base %</th>
-                  <th className="px-4 py-2.5">IOP Volume</th>
-                  <th className="px-4 py-2.5">IOP %</th>
-                  <th className="px-4 py-2.5">Weighted Score</th>
+                  <th className="px-4 py-2.5">Served Volume</th>
+                  <th className="px-4 py-2.5">Monthly Target</th>
+                  <th className="px-4 py-2.5">PA Day Target</th>
+                  <th className="px-4 py-2.5">Achievement %</th>
                   <th className="px-4 py-2.5">Status</th>
                 </tr>
               </thead>
@@ -971,24 +1005,96 @@ export default function KPIReportsView({ onNavigate }: KPIReportsViewProps) {
                 {kpi1Results.map((r) => (
                   <tr key={r.ownerId} className="hover:bg-slate-50">
                     <td className="px-4 py-2.5 font-bold text-brand-text">{r.ownerName}</td>
-                    <td className="px-4 py-2.5 font-mono">{r.baseVolume.toLocaleString()}</td>
-                    <td className="px-4 py-2.5 font-mono">{r.baseAttainmentPct}%</td>
-                    <td className="px-4 py-2.5 font-mono">{r.iopVolume.toLocaleString()}</td>
-                    <td className="px-4 py-2.5 font-mono">{r.iopAttainmentPct}%</td>
-                    <td className="px-4 py-2.5 font-mono font-bold">{r.weightedScore}%</td>
+                    <td className="px-4 py-2.5 font-mono">{r.servedVolume.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 font-mono">{r.monthlyTarget ? r.monthlyTarget.toLocaleString() : '-'}</td>
+                    <td className="px-4 py-2.5 font-mono">{r.paDayTarget ? r.paDayTarget.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '-'}</td>
+                    <td className="px-4 py-2.5 font-mono font-bold">{r.achievementPercentage}%</td>
                     <td className="px-4 py-2.5">
                       {!r.hasTarget ? (
                         <span className="text-[10px] font-extrabold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">
                           No Target Set
                         </span>
-                      ) : r.status === 'Excellent' ? (
-                        <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Excellent</span>
-                      ) : r.status === 'Good' ? (
-                        <span className="text-[10px] font-extrabold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">Good</span>
-                      ) : r.status === 'Average' ? (
-                        <span className="text-[10px] font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Average</span>
+                      ) : r.status === 'Green' ? (
+                        <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Green</span>
+                      ) : r.status === 'Blue' ? (
+                        <span className="text-[10px] font-extrabold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">Blue</span>
+                      ) : r.status === 'Yellow' ? (
+                        <span className="text-[10px] font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Yellow</span>
                       ) : (
-                        <span className="text-[10px] font-extrabold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">Low</span>
+                        <span className="text-[10px] font-extrabold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">Red</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* KPI 2 — Active Wakala Distribution vs Target */}
+      <div className="bg-brand-card p-6 rounded-2xl border border-brand-gray-border shadow-xs space-y-4 mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-black text-brand-text">KPI 2 — Active Wakala Distribution vs Target</h3>
+            <p className="text-xs text-brand-text-variant mt-0.5">
+              Active Wakalas split by Normal vs Priority (weighted 70% Normal / 30% Priority).
+            </p>
+          </div>
+        </div>
+
+        {kpi2Results.length === 0 ? (
+          <div className="text-center py-8 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+            <p className="text-xs font-bold text-slate-500">No owners found for this period.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="w-full text-left text-xs font-sans">
+              <thead className="bg-slate-50 text-slate-700 font-extrabold border-b border-slate-200">
+                <tr>
+                  <th className="px-4 py-2.5">Owner</th>
+                  <th className="px-4 py-2.5">Normal Served / Target / %</th>
+                  <th className="px-4 py-2.5">Priority Served / Target / %</th>
+                  <th className="px-4 py-2.5">Weighted Score</th>
+                  <th className="px-4 py-2.5">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white">
+                {kpi2Results.map((r) => (
+                  <tr key={r.ownerId} className="hover:bg-slate-50">
+                    <td className="px-4 py-2.5 font-bold text-brand-text">{r.ownerName}</td>
+                    <td className="px-4 py-2.5 font-mono">
+                      <span className="font-bold text-brand-primary">{r.normalServed}</span>
+                      <span className="text-slate-400"> / </span>
+                      <span>{r.normalTarget > 0 ? r.normalTarget : '-'}</span>
+                      <span className="text-slate-400"> (</span>
+                      <span className="font-bold">{r.normalTarget > 0 ? `${r.normalAchievementPct}%` : 'N/A'}</span>
+                      <span className="text-slate-400">)</span>
+                    </td>
+                    <td className="px-4 py-2.5 font-mono">
+                      <span className="font-bold text-purple-700">{r.priorityServed}</span>
+                      <span className="text-slate-400"> / </span>
+                      <span>{r.priorityTarget > 0 ? r.priorityTarget : '-'}</span>
+                      <span className="text-slate-400"> (</span>
+                      <span className="font-bold">{r.priorityTarget > 0 ? `${r.priorityAchievementPct}%` : 'N/A'}</span>
+                      <span className="text-slate-400">)</span>
+                    </td>
+                    <td className="px-4 py-2.5 font-mono font-black text-brand-primary">
+                      {r.hasTarget ? `${r.weightedScore}%` : '-'}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {!r.hasTarget ? (
+                        <span className="text-[10px] font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                          Target Pending
+                        </span>
+                      ) : r.status === 'Green' ? (
+                        <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Green</span>
+                      ) : r.status === 'Blue' ? (
+                        <span className="text-[10px] font-extrabold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">Blue</span>
+                      ) : r.status === 'Yellow' ? (
+                        <span className="text-[10px] font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Yellow</span>
+                      ) : (
+                        <span className="text-[10px] font-extrabold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">Red</span>
                       )}
                     </td>
                   </tr>

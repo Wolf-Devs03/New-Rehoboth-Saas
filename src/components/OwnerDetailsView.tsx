@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ViewType, Owner, ReportSubmission, WakalaEntry, BaseWakala } from '../types';
+import { ViewType, Owner, ReportSubmission, WakalaEntry, BaseWakala, PriorityWakala } from '../types';
+import { normalizeMsisdn } from '../utils/msisdn';
 import { buildOwnerWakalaMap } from '../utils/wakalaMapping';
 import { ownersList } from '../data';
 import WorkLocationSection from './WorkLocationSection';
@@ -34,6 +35,18 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getServicingRows } from '../utils/indexedDB';
+import { getClassifiedRowsCached } from '../utils/classificationCache';
+import { calculateOwnerMtdVolume } from '../utils/kpiEngine';
+import { resolveOwnerMatch } from '../utils/ownerMatch';
+import { AgentTarget, ManualOwnerTarget } from '../types';
+import { useAuth } from './AuthContext';
+import { 
+  resolveOwnerTarget, 
+  getSavedManualOwnerTargets, 
+  saveManualOwnerTarget, 
+  clearManualOwnerTargetKpi1Override, 
+  clearManualOwnerTargetKpi2Override 
+} from '../utils/targetResolution';
 
 const regionsList = [
   'Dar es Salaam',
@@ -133,11 +146,12 @@ export default function OwnerDetailsView({
     return foundOwner;
   })();
 
-  const [localOwner, setLocalOwner] = useState<Owner>(owner);
+  const [localOwner, setLocalOwner] = useState<Owner | undefined>(owner);
   const [activeTab, setActiveTab] = useState<'overview' | 'wakalas' | 'location'>('overview');
 
   // Dynamic submissions list per owner
   const [submissions, setSubmissions] = useState<ReportSubmission[]>(() => {
+    if (!localOwner) return [];
     const key = `reportSubmissions_${localOwner.id || localOwner.name}`;
     const saved = localStorage.getItem(key);
     if (saved) {
@@ -455,7 +469,7 @@ export default function OwnerDetailsView({
 
   // Find rows belonging to this owner
   const ownerRows = useMemo(() => {
-    if (servicingRows.length === 0) return [];
+    if (!localOwner || !localOwner.name || servicingRows.length === 0) return [];
     
     const ownerTills = (tillsList || [])
       .filter((t: any) => t.assignedOwner && t.assignedOwner.toLowerCase() === localOwner.name.toLowerCase())
@@ -488,6 +502,16 @@ export default function OwnerDetailsView({
     isSynced,
     rankStr 
   } = useMemo(() => {
+    if (!localOwner || !localOwner.name) {
+      return {
+        totalVolumeServed: 0,
+        totalCommissions: 0,
+        activeWakalaCount: 0,
+        inactiveWakalaCount: 0,
+        isSynced: false,
+        rankStr: 'Not yet synced'
+      };
+    }
     const allWakalas = [...(localOwner.baseWakalas || []), ...(localOwner.iopWakalas || [])];
     
     if (allWakalas.length === 0) {
@@ -564,7 +588,9 @@ export default function OwnerDetailsView({
     if (allOwners.length === 0) allOwners = [localOwner];
 
     allOwners.forEach((o: any) => {
-      ownerVolumes[o.name.toLowerCase()] = 0;
+      if (o && o.name) {
+        ownerVolumes[o.name.toLowerCase()] = 0;
+      }
     });
 
     servicingRows.forEach(row => {
@@ -600,6 +626,244 @@ export default function OwnerDetailsView({
       rankStr: `${tier} #${rankNum}`
     };
   }, [servicingRows, ownerRows, tillsList, localOwner]);
+
+  const { priorityWakalaCount, normalWakalaCount, hasPriorityData } = useMemo(() => {
+    if (!localOwner) {
+      return { priorityWakalaCount: 0, normalWakalaCount: 0, hasPriorityData: false };
+    }
+
+    const rawPriority = localStorage.getItem('priorityWakalaList');
+    if (!rawPriority) {
+      return { priorityWakalaCount: 0, normalWakalaCount: 0, hasPriorityData: false };
+    }
+
+    try {
+      const list: PriorityWakala[] = JSON.parse(rawPriority);
+      if (!Array.isArray(list) || list.length === 0) {
+        return { priorityWakalaCount: 0, normalWakalaCount: 0, hasPriorityData: false };
+      }
+
+      const priorityMsisdnSet = new Set<string>();
+      list.forEach(p => {
+        const norm = normalizeMsisdn(p.msisdn);
+        if (norm) priorityMsisdnSet.add(norm);
+      });
+
+      if (priorityMsisdnSet.size === 0) {
+        return { priorityWakalaCount: 0, normalWakalaCount: 0, hasPriorityData: false };
+      }
+
+      const ownerWakalas = [...(localOwner.baseWakalas || []), ...(localOwner.iopWakalas || [])];
+      let pCount = 0;
+
+      ownerWakalas.forEach(w => {
+        const norm1 = normalizeMsisdn(w.msisdn);
+        const norm2 = normalizeMsisdn((w as any).altMsisdn || (w as any).alternateNumber);
+        if ((norm1 && priorityMsisdnSet.has(norm1)) || (norm2 && priorityMsisdnSet.has(norm2))) {
+          pCount++;
+        }
+      });
+
+      return {
+        priorityWakalaCount: pCount,
+        normalWakalaCount: Math.max(0, ownerWakalas.length - pCount),
+        hasPriorityData: true
+      };
+    } catch (e) {
+      return { priorityWakalaCount: 0, normalWakalaCount: 0, hasPriorityData: false };
+    }
+  }, [localOwner]);
+
+  const ownerMtdData = useMemo(() => {
+    if (!localOwner || servicingRows.length === 0) {
+      return {
+        servedVolume: 0,
+        baseVolume: 0,
+        iopVolume: 0,
+        monthlyTarget: 0,
+        paDayTarget: 0,
+        achievementPercentage: 0,
+        status: 'Red' as const,
+        hasTarget: false
+      };
+    }
+
+    const savedSaTills = localStorage.getItem('saTillRegistry');
+    const saTillRegistry = savedSaTills ? JSON.parse(savedSaTills) : [];
+    const savedBaseWakalas = localStorage.getItem('baseWakalaIndex');
+    const baseWakalaIndex = savedBaseWakalas ? JSON.parse(savedBaseWakalas) : [];
+    const savedOwners = localStorage.getItem('ownersList');
+    const owners: Owner[] = savedOwners ? JSON.parse(savedOwners) : [];
+
+    const classified = getClassifiedRowsCached(servicingRows, saTillRegistry, baseWakalaIndex, tillsList, owners);
+
+    let vols = calculateOwnerMtdVolume(classified, localOwner.id);
+
+    if (vols.servedVolume === 0 && localOwner.name) {
+      const matched = resolveOwnerMatch(localOwner.name, owners, 'Owner Portal');
+      if (matched.matchedOwner?.id) {
+        vols = calculateOwnerMtdVolume(classified, matched.matchedOwner.id);
+      }
+    }
+
+    const savedTargets = localStorage.getItem('agentTargets');
+    const agentTargets: AgentTarget[] = savedTargets ? JSON.parse(savedTargets) : [];
+    const manualTargets = getSavedManualOwnerTargets();
+
+    let period = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const periods = agentTargets.map(t => t.period).filter((p): p is string => Boolean(p));
+    if (periods.length > 0) {
+      const sortedPeriods = Array.from(new Set(periods)).sort().reverse();
+      period = sortedPeriods[0];
+    }
+
+    const targetRes = resolveOwnerTarget(
+      localOwner.id || '',
+      period,
+      manualTargets,
+      agentTargets,
+      owners
+    );
+
+    const monthlyTarget = targetRes.monthlyTarget || 0;
+    const paDayTarget = monthlyTarget / 24;
+    const achievementPercentage = monthlyTarget > 0 ? (vols.servedVolume / monthlyTarget) * 100 : 0;
+    
+    let status: 'Green' | 'Blue' | 'Yellow' | 'Red' = 'Red';
+    if (achievementPercentage >= 90) status = 'Green';
+    else if (achievementPercentage >= 70) status = 'Blue';
+    else if (achievementPercentage >= 60) status = 'Yellow';
+
+    return {
+      servedVolume: vols.servedVolume,
+      baseVolume: vols.baseVolume,
+      iopVolume: vols.iopVolume,
+      monthlyTarget,
+      paDayTarget,
+      achievementPercentage: Math.round(achievementPercentage * 10) / 10,
+      status,
+      hasTarget: targetRes.source !== 'none' && monthlyTarget > 0
+    };
+  }, [localOwner, servicingRows, tillsList]);
+
+  const { user } = useAuth();
+  const isAdmin = !user || user.role === 'Admin';
+
+  const [targetPeriod, setTargetPeriod] = useState<string>(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
+
+  const [manualTargetsList, setManualTargetsList] = useState<ManualOwnerTarget[]>(() => getSavedManualOwnerTargets());
+
+  const currentManual = useMemo(() => {
+    if (!localOwner?.id) return undefined;
+    return manualTargetsList.find(m => m.ownerId === localOwner.id && m.period === targetPeriod);
+  }, [localOwner?.id, targetPeriod, manualTargetsList]);
+
+  const [kpi1BaseInput, setKpi1BaseInput] = useState<string>('');
+  const [kpi1IopInput, setKpi1IopInput] = useState<string>('');
+  const [kpi2NormalInput, setKpi2NormalInput] = useState<string>('');
+  const [kpi2PriorityInput, setKpi2PriorityInput] = useState<string>('');
+
+  useEffect(() => {
+    if (currentManual) {
+      setKpi1BaseInput(currentManual.kpi1BaseTarget !== undefined ? String(currentManual.kpi1BaseTarget) : '');
+      setKpi1IopInput(currentManual.kpi1IopTarget !== undefined ? String(currentManual.kpi1IopTarget) : '');
+      setKpi2NormalInput(currentManual.kpi2NormalTarget !== undefined ? String(currentManual.kpi2NormalTarget) : '');
+      setKpi2PriorityInput(currentManual.kpi2PriorityTarget !== undefined ? String(currentManual.kpi2PriorityTarget) : '');
+    } else {
+      setKpi1BaseInput('');
+      setKpi1IopInput('');
+      setKpi2NormalInput('');
+      setKpi2PriorityInput('');
+    }
+  }, [currentManual, localOwner?.id, targetPeriod]);
+
+  const computedKpi1Sum = useMemo(() => {
+    const b = parseFloat(kpi1BaseInput) || 0;
+    const i = parseFloat(kpi1IopInput) || 0;
+    return b + i;
+  }, [kpi1BaseInput, kpi1IopInput]);
+
+  const hasKpi1Manual = currentManual?.kpi1BaseTarget !== undefined || currentManual?.kpi1IopTarget !== undefined;
+  const hasKpi2Manual = currentManual?.kpi2NormalTarget !== undefined || currentManual?.kpi2PriorityTarget !== undefined;
+
+  const hasKpi1Uploaded = useMemo(() => {
+    if (!localOwner) return false;
+    const saved = localStorage.getItem('agentTargets');
+    if (!saved) return false;
+    try {
+      const targets: AgentTarget[] = JSON.parse(saved);
+      const savedOwnersStr = localStorage.getItem('ownersList');
+      const owners: Owner[] = savedOwnersStr ? JSON.parse(savedOwnersStr) : [];
+      const forPeriod = targets.filter(t => t.period === targetPeriod);
+      for (const t of forPeriod) {
+        const match = resolveOwnerMatch(t.ownerName, owners, 'TargetCheck');
+        if (match.matchedOwner?.id === localOwner.id && t.monthlyTarget > 0) return true;
+      }
+    } catch (e) { console.error(e); }
+    return false;
+  }, [localOwner?.id, targetPeriod]);
+
+  const handleSaveAdminTargets = () => {
+    if (!localOwner?.id) return;
+    const baseVal = kpi1BaseInput.trim() !== '' ? parseFloat(kpi1BaseInput) : undefined;
+    const iopVal = kpi1IopInput.trim() !== '' ? parseFloat(kpi1IopInput) : undefined;
+    const normalVal = kpi2NormalInput.trim() !== '' ? parseInt(kpi2NormalInput, 10) : undefined;
+    const priorityVal = kpi2PriorityInput.trim() !== '' ? parseInt(kpi2PriorityInput, 10) : undefined;
+
+    const targetObj: ManualOwnerTarget = {
+      ownerId: localOwner.id,
+      period: targetPeriod,
+      kpi1BaseTarget: baseVal !== undefined && !isNaN(baseVal) ? baseVal : undefined,
+      kpi1IopTarget: iopVal !== undefined && !isNaN(iopVal) ? iopVal : undefined,
+      kpi2NormalTarget: normalVal !== undefined && !isNaN(normalVal) ? normalVal : undefined,
+      kpi2PriorityTarget: priorityVal !== undefined && !isNaN(priorityVal) ? priorityVal : undefined,
+      setBy: user?.email || 'Admin',
+      setAt: new Date().toISOString()
+    };
+
+    const updated = saveManualOwnerTarget(targetObj);
+    setManualTargetsList(updated);
+  };
+
+  const handleClearKpi1Override = () => {
+    if (!localOwner?.id) return;
+    const updated = clearManualOwnerTargetKpi1Override(localOwner.id, targetPeriod);
+    setManualTargetsList(updated);
+    setKpi1BaseInput('');
+    setKpi1IopInput('');
+  };
+
+  const handleClearKpi2Override = () => {
+    if (!localOwner?.id) return;
+    const updated = clearManualOwnerTargetKpi2Override(localOwner.id, targetPeriod);
+    setManualTargetsList(updated);
+    setKpi2NormalInput('');
+    setKpi2PriorityInput('');
+  };
+
+  if (!localOwner) {
+    return (
+      <div className="min-h-[60vh] flex flex-col items-center justify-center p-8 text-center space-y-4 font-sans">
+        <div className="h-16 w-16 rounded-full bg-brand-primary/10 flex items-center justify-center text-brand-primary">
+          <User className="h-8 w-8 text-brand-primary" />
+        </div>
+        <h2 className="text-xl font-bold text-brand-text">No Owner Selected</h2>
+        <p className="text-sm text-brand-text-variant max-w-md">
+          Please select a Wakala Owner from the directory to view their detailed performance profile, Wakalas, and servicing metrics.
+        </p>
+        <button
+          onClick={() => onNavigate(ViewType.OWNERS)}
+          className="inline-flex items-center gap-2 rounded-xl bg-brand-primary px-5 py-2.5 font-sans text-sm font-semibold text-white shadow-ambient hover:bg-brand-primary-light transition-all cursor-pointer mt-2"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Owners List
+        </button>
+      </div>
+    );
+  }
 
   const allWakalas = [...(localOwner.baseWakalas || []), ...(localOwner.iopWakalas || [])];
 
@@ -739,31 +1003,32 @@ export default function OwnerDetailsView({
 
       {activeTab === 'overview' && (
         <>
-          {/* Primary Metrics Grid (Image 8 details) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Metric 1 */}
-            <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient">
-              <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Agents Served</span>
-              <div className="mt-2 flex items-baseline justify-between">
-                <span className="font-sans text-2xl font-black text-brand-text">{allWakalas.length}</span>
-                <span className="font-sans text-[11px] font-bold text-brand-primary bg-brand-primary-container/20 px-1.5 py-0.5 rounded">Active Network</span>
+          {/* Primary Metrics Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {/* Metric 1: Wakala Breakdown */}
+            <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
+              <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Wakala</span>
+              <div className="mt-2 grid grid-cols-3 gap-2 border-t border-brand-gray-border/50 pt-2">
+                <div>
+                  <span className="block font-sans text-[9px] font-semibold text-brand-text-variant uppercase">Total</span>
+                  <span className="font-sans text-base sm:text-lg font-black text-brand-text">{allWakalas.length}</span>
+                </div>
+                <div>
+                  <span className="block font-sans text-[9px] font-semibold text-brand-text-variant uppercase">Priority</span>
+                  <span className={`font-sans text-xs sm:text-sm font-black ${hasPriorityData ? 'text-brand-primary font-mono' : 'text-brand-text-variant'}`}>
+                    {hasPriorityData ? priorityWakalaCount : 'Not yet synced'}
+                  </span>
+                </div>
+                <div>
+                  <span className="block font-sans text-[9px] font-semibold text-brand-text-variant uppercase">Normal</span>
+                  <span className={`font-sans text-xs sm:text-sm font-black ${hasPriorityData ? 'text-brand-text font-mono' : 'text-brand-text-variant'}`}>
+                    {hasPriorityData ? normalWakalaCount : 'Not yet synced'}
+                  </span>
+                </div>
               </div>
             </div>
 
-            {/* Metric 2 */}
-            <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient">
-              <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Transaction Volume</span>
-              <div className="mt-2 flex items-baseline justify-between">
-                <span className="font-sans text-xl sm:text-2xl font-black text-brand-primary truncate max-w-full">
-                  {isSynced ? `TZS ${totalVolumeServed.toLocaleString()}` : 'Not yet synced'}
-                </span>
-                <span className="font-sans text-[11px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded shrink-0">
-                  {isSynced ? '+12% MoM' : 'Pending Sync'}
-                </span>
-              </div>
-            </div>
-
-            {/* Metric 3 */}
+            {/* Metric 2: Active Wakala */}
             <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient">
               <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Active Wakala</span>
               <div className="mt-2 flex items-baseline justify-between">
@@ -776,7 +1041,7 @@ export default function OwnerDetailsView({
               </div>
             </div>
 
-            {/* Metric 4 */}
+            {/* Metric 3: Inactive Wakala */}
             <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient">
               <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Inactive Wakala</span>
               <div className="mt-2 flex items-baseline justify-between">
@@ -791,51 +1056,93 @@ export default function OwnerDetailsView({
           </div>
 
           {/* Daily Performance KPIs Section */}
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
               <h3 className="font-sans text-xs font-black uppercase text-brand-primary tracking-wider font-mono">
-                Daily MGT Performance KPIs (Latest Sync)
+                Daily MGT Performance KPIs & MTD Serviced Volume
               </h3>
               <span className="font-sans text-[10px] font-mono font-black text-brand-text-variant bg-slate-100 px-2.5 py-1 rounded">
                 LATEST SYNC: {localOwner.lastSyncDate || "No Ingestion Today"}
               </span>
             </div>
 
-            <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
-              {/* Card 1: Opening Float */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Opening Float</span>
-                <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
-                  <span className="font-sans text-lg sm:text-xl font-black text-brand-text">
-                    TZS {(localOwner.openingFloat || 0).toLocaleString()}
+            {/* Consolidated & Expanded MTD Serviced Volume Card */}
+            <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-6 shadow-ambient flex flex-col justify-between space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">
+                    MTD Serviced Volume (Base + IOP)
                   </span>
-                  <span className="text-[9px] font-bold text-slate-400 font-mono">START</span>
+                  <div className="mt-1 flex items-baseline gap-2">
+                    <span className="font-sans text-2xl sm:text-3xl font-black text-brand-primary font-mono">
+                      TZS {ownerMtdData.servedVolume.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">
+                    Monthly Target
+                  </span>
+                  <span className="font-sans text-sm sm:text-base font-extrabold text-brand-text font-mono mt-1 block">
+                    {ownerMtdData.hasTarget
+                      ? `TZS ${ownerMtdData.monthlyTarget.toLocaleString()}`
+                      : <span className="text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-lg text-xs font-sans font-bold">Target Pending</span>}
+                  </span>
                 </div>
               </div>
 
-              {/* Card 2: Served Amount */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Served Amount</span>
-                <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
-                  <span className="font-sans text-lg sm:text-xl font-black text-indigo-600">
-                    TZS {(localOwner.servedAmount || 0).toLocaleString()}
+              {/* Progress Bar & Percentage */}
+              {ownerMtdData.hasTarget ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between font-sans text-xs font-bold">
+                    <span className="text-brand-text-variant">Target Fulfillment Progress</span>
+                    <span className={`font-mono text-sm ${
+                      ownerMtdData.status === 'Green' ? 'text-emerald-700' :
+                      ownerMtdData.status === 'Blue' ? 'text-blue-700' :
+                      ownerMtdData.status === 'Yellow' ? 'text-amber-700' : 'text-rose-700'
+                    }`}>
+                      {ownerMtdData.achievementPercentage}% Achieved
+                    </span>
+                  </div>
+                  <div className="h-3.5 w-full bg-slate-100 rounded-full overflow-hidden p-0.5 border border-slate-200">
+                    <div
+                      className={`h-full transition-all rounded-full ${
+                        ownerMtdData.status === 'Green' ? 'bg-emerald-500' :
+                        ownerMtdData.status === 'Blue' ? 'bg-blue-500' :
+                        ownerMtdData.status === 'Yellow' ? 'bg-amber-500' : 'bg-rose-500'
+                      }`}
+                      style={{ width: `${Math.min(100, Math.max(0, ownerMtdData.achievementPercentage))}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-amber-50/60 border border-amber-200/80 rounded-xl flex items-center justify-between text-xs text-amber-900 font-medium">
+                  <span>Target Fulfillment Progress</span>
+                  <span className="font-bold text-amber-700 bg-amber-100 border border-amber-300 px-2.5 py-0.5 rounded-lg">Target Pending</span>
+                </div>
+              )}
+
+              {/* Informational Breakdown */}
+              <div className="pt-3 border-t border-brand-gray-border/60 flex flex-wrap items-center justify-between gap-3 text-xs font-sans">
+                <span className="text-[10px] font-bold uppercase text-brand-text-variant tracking-wider">
+                  Volume Breakdown (Informational)
+                </span>
+                <div className="flex flex-wrap items-center gap-4 font-mono font-bold">
+                  <span className="flex items-center gap-1.5 text-slate-700">
+                    <span className="h-2 w-2 rounded-full bg-indigo-500 inline-block" />
+                    Base Volume: <span className="text-brand-primary">TZS {ownerMtdData.baseVolume.toLocaleString()}</span>
                   </span>
-                  <span className="text-[9px] font-bold text-indigo-600 font-mono">SERVED</span>
+                  <span className="flex items-center gap-1.5 text-slate-700">
+                    <span className="h-2 w-2 rounded-full bg-purple-500 inline-block" />
+                    IOP Volume: <span className="text-purple-700">TZS {ownerMtdData.iopVolume.toLocaleString()}</span>
+                  </span>
                 </div>
               </div>
+            </div>
 
-              {/* Card 3: Remaining Float */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Remaining Float</span>
-                <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
-                  <span className="font-sans text-lg sm:text-xl font-black text-emerald-600">
-                    TZS {(localOwner.remainingFloat || 0).toLocaleString()}
-                  </span>
-                  <span className="text-[9px] font-bold text-emerald-600 font-mono">CURRENT</span>
-                </div>
-              </div>
-
-              {/* Card 4: Transactions Today */}
+            {/* Daily Ingestion Sub-cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* Card 1: Transactions Today */}
               <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
                 <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Transactions Today</span>
                 <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
@@ -846,29 +1153,185 @@ export default function OwnerDetailsView({
                 </div>
               </div>
 
-              {/* Card 5: Penalty (CP Servicing) */}
+              {/* Card 2: CP Penalty */}
               <div className="rounded-2xl border border-rose-200 bg-rose-50/50 p-5 shadow-ambient flex flex-col justify-between">
                 <span className="block font-sans text-[10px] font-bold text-rose-800 uppercase tracking-wider">CP Penalty</span>
                 <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
                   <span className="font-sans text-lg sm:text-xl font-black text-rose-950 font-mono">
                     TZS {(localOwner.penalty || 0).toLocaleString()}
                   </span>
-                  <span className="text-[9px] font-bold text-rose-700 font-mono">TARGET</span>
+                  <span className="text-[9px] font-bold text-rose-700 font-mono">PENALTY</span>
                 </div>
               </div>
 
-              {/* Card 6: IOP Balance */}
+              {/* Card 3: IOP Volume (Daily) */}
               <div className="rounded-2xl border border-purple-200 bg-purple-50/50 p-5 shadow-ambient flex flex-col justify-between">
-                <span className="block font-sans text-[10px] font-bold text-purple-800 uppercase tracking-wider">IOP Balance</span>
+                <span className="block font-sans text-[10px] font-bold text-purple-800 uppercase tracking-wider">IOP Volume (Daily)</span>
                 <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
                   <span className="font-sans text-lg sm:text-xl font-black text-purple-950 font-mono">
-                    TZS {(localOwner.iopBalance || 0).toLocaleString()}
+                    TZS {(localOwner.iopVolume || 0).toLocaleString()}
                   </span>
-                  <span className="text-[9px] font-bold text-purple-700 font-mono">CROSS</span>
+                  <span className="text-[9px] font-bold text-purple-700 font-mono">VOLUME</span>
                 </div>
               </div>
             </div>
           </div>
+
+          {/* Admin-Only: Targets & Priority Configuration */}
+          {isAdmin && (
+            <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-6 shadow-ambient space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-brand-gray-border pb-4">
+                <div>
+                  <h3 className="font-sans text-base font-bold text-brand-text flex items-center gap-2">
+                    <span>Targets & Priority Configuration</span>
+                    <span className="text-[10px] font-extrabold text-amber-800 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md uppercase tracking-wider">
+                      Admin Access
+                    </span>
+                  </h3>
+                  <p className="font-sans text-xs text-brand-text-variant mt-0.5">
+                    Set manual overrides for KPI 1 (Base Target & IOP Target) and KPI 2 (Normal Target & Priority Target counts).
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-brand-text">Target Period:</label>
+                  <input
+                    type="month"
+                    value={targetPeriod}
+                    onChange={(e) => setTargetPeriod(e.target.value)}
+                    className="text-xs rounded-lg border border-slate-300 px-2.5 py-1.5 font-mono bg-white"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* KPI 1 Configuration */}
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h4 className="font-bold text-sm text-brand-text">KPI 1 — Serviced Volume Target (TZS)</h4>
+                    <div className="flex items-center gap-2">
+                      {hasKpi1Manual ? (
+                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded-lg">
+                          Using: Manual Override
+                        </span>
+                      ) : hasKpi1Uploaded ? (
+                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-blue-100 text-blue-900 border border-blue-300 rounded-lg">
+                          Using: Uploaded Target
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300 rounded-lg">
+                          No Target Set
+                        </span>
+                      )}
+                      {hasKpi1Manual && (
+                        <button
+                          type="button"
+                          onClick={handleClearKpi1Override}
+                          className="text-[10px] font-bold text-rose-700 hover:text-rose-900 underline cursor-pointer"
+                        >
+                          Clear Override
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">Base Target (TZS)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 50000000"
+                        value={kpi1BaseInput}
+                        onChange={(e) => setKpi1BaseInput(e.target.value)}
+                        className="w-full text-xs font-mono rounded-lg border border-slate-300 px-3 py-2 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">IOP Target (TZS)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 30000000"
+                        value={kpi1IopInput}
+                        onChange={(e) => setKpi1IopInput(e.target.value)}
+                        className="w-full text-xs font-mono rounded-lg border border-slate-300 px-3 py-2 bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 flex items-center justify-between font-mono text-xs">
+                    <span className="font-bold text-slate-600">Combined Monthly Target:</span>
+                    <span className="font-black text-brand-primary text-sm">
+                      TZS {computedKpi1Sum.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* KPI 2 Configuration */}
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h4 className="font-bold text-sm text-brand-text">KPI 2 — Active Wakala Target (Counts)</h4>
+                    <div className="flex items-center gap-2">
+                      {hasKpi2Manual ? (
+                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded-lg">
+                          Using: Manual Override
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300 rounded-lg">
+                          No Manual Target
+                        </span>
+                      )}
+                      {hasKpi2Manual && (
+                        <button
+                          type="button"
+                          onClick={handleClearKpi2Override}
+                          className="text-[10px] font-bold text-rose-700 hover:text-rose-900 underline cursor-pointer"
+                        >
+                          Clear Override
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">Normal Target (Count)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 15"
+                        value={kpi2NormalInput}
+                        onChange={(e) => setKpi2NormalInput(e.target.value)}
+                        className="w-full text-xs font-mono rounded-lg border border-slate-300 px-3 py-2 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">Priority Target (Count)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 5"
+                        value={kpi2PriorityInput}
+                        onChange={(e) => setKpi2PriorityInput(e.target.value)}
+                        className="w-full text-xs font-mono rounded-lg border border-slate-300 px-3 py-2 bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 flex items-center justify-between font-mono text-xs">
+                    <span className="font-bold text-slate-600">Weighting Rule:</span>
+                    <span className="font-bold text-slate-700">70% Normal / 30% Priority</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={handleSaveAdminTargets}
+                  className="px-5 py-2.5 bg-brand-primary text-white text-xs font-bold rounded-xl hover:bg-opacity-90 shadow-sm cursor-pointer transition-all"
+                >
+                  Save Target Parameters
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Target Fulfillment & Distribution sub-grid */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -880,30 +1343,47 @@ export default function OwnerDetailsView({
                 
                 <div className="mt-6 space-y-4">
                   <div>
-                    <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Amount Served (Monthly)</span>
+                    <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Amount Served (Monthly MTD)</span>
                     <div className="mt-1 flex items-baseline justify-between">
-                      <span className="font-sans text-2xl font-black text-brand-primary">
-                        {isSynced ? `TZS ${(totalVolumeServed / 1000000).toFixed(1)}M` : 'Not yet synced'}
+                      <span className="font-sans text-2xl font-black text-brand-primary font-mono">
+                        TZS {ownerMtdData.servedVolume.toLocaleString()}
                       </span>
-                      <span className="font-sans text-xs font-semibold text-brand-text-variant">Target: TZS 15.0M</span>
+                      <span className="font-sans text-xs font-semibold text-brand-text-variant font-mono">
+                        {ownerMtdData.hasTarget ? `Target: TZS ${ownerMtdData.monthlyTarget.toLocaleString()}` : 'Target Pending'}
+                      </span>
                     </div>
                   </div>
 
                   {/* Progress bar and achievement text */}
-                  <div className="space-y-1.5">
-                    <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-brand-primary rounded-full transition-all" 
-                        style={{ width: `${isSynced ? Math.min((totalVolumeServed / 15000000) * 100, 100) : 0}%` }} 
-                      />
+                  {ownerMtdData.hasTarget ? (
+                    <div className="space-y-1.5">
+                      <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden">
+                        <div 
+                          className={`h-full rounded-full transition-all ${
+                            ownerMtdData.status === 'Green' ? 'bg-emerald-500' :
+                            ownerMtdData.status === 'Blue' ? 'bg-blue-500' :
+                            ownerMtdData.status === 'Yellow' ? 'bg-amber-500' : 'bg-rose-500'
+                          }`} 
+                          style={{ width: `${Math.min(100, Math.max(0, ownerMtdData.achievementPercentage))}%` }} 
+                        />
+                      </div>
+                      <div className="flex justify-between font-sans text-xs font-semibold text-brand-text">
+                        <span>Performance (MGT Contribution)</span>
+                        <span className={`font-mono font-bold ${
+                          ownerMtdData.status === 'Green' ? 'text-emerald-700' :
+                          ownerMtdData.status === 'Blue' ? 'text-blue-700' :
+                          ownerMtdData.status === 'Yellow' ? 'text-amber-700' : 'text-rose-700'
+                        }`}>
+                          {ownerMtdData.achievementPercentage}% achieved
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex justify-between font-sans text-xs font-semibold text-brand-text">
+                  ) : (
+                    <div className="p-3 bg-amber-50/60 border border-amber-200/80 rounded-xl text-xs text-amber-900 font-medium flex justify-between items-center">
                       <span>Performance (MGT Contribution)</span>
-                      <span className="text-brand-primary">
-                        {isSynced ? `${((totalVolumeServed / 15000000) * 100).toFixed(1)}% achieved` : 'Not yet synced'}
-                      </span>
+                      <span className="text-amber-700 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded font-bold">Target Pending</span>
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
 

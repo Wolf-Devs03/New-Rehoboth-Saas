@@ -91,13 +91,23 @@ export interface PriorityWakala {
   importedAt: string;
 }
 
+export interface ManualOwnerTarget {
+  ownerId: string;
+  period: string;
+  kpi1BaseTarget?: number;
+  kpi1IopTarget?: number;
+  kpi2NormalTarget?: number;
+  kpi2PriorityTarget?: number;
+  setBy: string;
+  setAt: string;
+}
+
 export interface AgentTarget {
   ownerName: string;          // raw name as it appeared in the source file
   location?: string;          // e.g. "KITANGARI", "NDANDA" — the block's location label
   monthlyTarget: number;      // "TOTAL MONTHLY TARGET" value
   achievedValue: number;      // "TOTAL ACTUAL" value
   achievementPercentage: number; // pre-capped percentage from the source (0-1 range)
-  penaltyValue: number;       // "CP_Servicing_Val" from the source file
   period: string;             // e.g. "2026-07", derived from the report's stated date range
   importedAt: string;
 }
@@ -130,7 +140,7 @@ export interface Owner {
   highestTx?: number;
   lowestTx?: number;
   penalty?: number;            // Total penalty for the period
-  iopBalance?: number;         // Current MTD IOP balance
+  iopVolume?: number;          // Current MTD IOP volume
   nameAliases?: string[];
 }
 

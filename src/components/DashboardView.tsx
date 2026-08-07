@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ViewType, KPIMetric, TopOwner, RecentReport, AuditReport } from '../types';
 import { dashboardKPIs, topOwners, recentReports, ownersList } from '../data';
-import { calculateCompanyKPIs } from '../utils/mappingEngine';
+import { calculateCompanyKPIs, CompanyKPIsResult } from '../utils/mappingEngine';
 import { getDailyServicingRows } from '../utils/indexedDB';
 import { 
-  TrendingUp, 
   Users, 
   UploadCloud, 
   History, 
@@ -14,13 +13,11 @@ import {
   AlertTriangle,
   CheckCircle2, 
   DollarSign, 
-  Award,
   Activity,
   Calendar,
   Layers,
   ShieldCheck,
-  Sparkles,
-  FileDown
+  Sparkles
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useCompany } from './CompanyContext';
@@ -149,7 +146,27 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
     return [];
   };
 
-  const [companyKPIs, setCompanyKPIs] = useState(() => calculateCompanyKPIs([]));
+  const defaultCompanyKPIs: CompanyKPIsResult = {
+    openingFloat: 0,
+    floatReceived: 0,
+    floatServed: 0,
+    closingFloat: 0,
+    mtdOpeningFloat: 0,
+    mtdFloatReceived: 0,
+    mtdFloatServed: 0,
+    mtdClosingFloat: 0,
+    totalPenalty: 0,
+    unattributedPenalty: 0,
+    penaltyByOwner: {},
+    totalIopVolume: 0,
+    iopVolumeByOwner: {},
+    reportingMonth: '—',
+    lastUpload: '—',
+    latestDay: '',
+    earliestDay: ''
+  };
+
+  const [companyKPIs, setCompanyKPIs] = useState<CompanyKPIsResult>(defaultCompanyKPIs);
   const [topOwnersList, setTopOwnersList] = useState<TopOwner[]>([]);
 
   // Dynamic Recent Reports list derived from the persisted audit history logs
@@ -190,8 +207,11 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
       }
 
       if (isMounted) {
-        setCompanyKPIs(calculateCompanyKPIs(rows));
-        setTopOwnersList(computeTopOwnersList(rows));
+        const kpis = await calculateCompanyKPIs(rows);
+        if (isMounted) {
+          setCompanyKPIs(kpis);
+          setTopOwnersList(computeTopOwnersList(rows));
+        }
       }
     };
 
@@ -434,34 +454,8 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
       {/* Upper Welcome Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="font-sans text-2xl sm:text-3xl font-extrabold tracking-tight text-brand-text">Executive Dashboard</h2>
+          <h2 className="font-sans text-2xl sm:text-3xl font-extrabold tracking-tight text-brand-text">Admin Dashboard</h2>
           <p className="font-sans text-sm text-brand-text-variant mt-1">Real-time oversight of {companyName} intelligence and monthly KPI targets.</p>
-        </div>
-        <div className="flex flex-wrap gap-3">
-          <button 
-            onClick={handleExportPDF}
-            className="flex items-center gap-2 rounded-xl border border-brand-gray-border bg-brand-card px-4 py-2.5 font-sans text-sm font-semibold text-brand-text hover:bg-brand-gray-hover hover:border-brand-gray-border transition-all cursor-pointer"
-            id="export-pdf-btn"
-          >
-            <FileDown className="h-4.5 w-4.5 text-brand-primary" />
-            Export PDF
-          </button>
-          <button 
-            onClick={() => onNavigate(ViewType.KPI_REPORTS)}
-            className="flex items-center gap-2 rounded-xl border border-brand-gray-border bg-brand-card px-4 py-2.5 font-sans text-sm font-semibold text-brand-primary hover:bg-brand-gray-hover transition-all cursor-pointer"
-            id="kpi-analysis-btn"
-          >
-            <TrendingUp className="h-4.5 w-4.5" />
-            KPI Analysis
-          </button>
-          <button 
-            onClick={() => onNavigate(ViewType.UPLOAD_REPORTS)}
-            className="flex items-center gap-2 rounded-xl bg-brand-primary px-4 py-2.5 font-sans text-sm font-semibold text-white shadow-ambient hover:bg-brand-primary-light transition-all cursor-pointer"
-            id="upload-reports-quick-btn"
-          >
-            <UploadCloud className="h-4.5 w-4.5" />
-            Upload New Data
-          </button>
         </div>
       </div>
 
@@ -495,56 +489,16 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
               <Calendar className="h-4 w-4 text-brand-primary" />
               <h3 className="font-sans text-xs font-black uppercase tracking-wider text-brand-primary">Today ({companyKPIs.latestDay})</h3>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Total Company Opening Float */}
+            <div className="grid grid-cols-1 gap-4">
               <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
                 <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Company Opening Float</span>
-                  <span className="block font-sans text-xl font-black text-brand-text mt-2 font-mono">
-                    TZS {companyKPIs.openingFloat.toLocaleString()}
-                  </span>
-                </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-brand-text-variant bg-brand-gray-hover px-2 py-0.5 rounded">
-                  STARTING BALANCE
-                </span>
-              </div>
-
-              {/* Total Company Float Received */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Company Float Received</span>
-                  <span className="block font-sans text-xl font-black text-status-success-text mt-2 font-mono">
-                    TZS {companyKPIs.floatReceived.toLocaleString()}
-                  </span>
-                </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-status-success-text bg-status-success-bg px-2 py-0.5 rounded">
-                  FLOAT INGESTED
-                </span>
-              </div>
-
-              {/* Total Company Float Served */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Company Float Served</span>
+                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Volume</span>
                   <span className="block font-sans text-xl font-black text-status-info-text mt-2 font-mono">
                     TZS {companyKPIs.floatServed.toLocaleString()}
                   </span>
                 </div>
                 <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-status-info-text bg-status-info-bg px-2 py-0.5 rounded">
-                  FLOAT SERVED
-                </span>
-              </div>
-
-              {/* Total Company Closing Float */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Company Closing Float</span>
-                  <span className="block font-sans text-xl font-black text-brand-text mt-2 font-mono">
-                    TZS {companyKPIs.closingFloat.toLocaleString()}
-                  </span>
-                </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-brand-text-variant bg-brand-gray-hover px-2 py-0.5 rounded">
-                  ENDING BALANCE
+                  TOTAL SERVICED TODAY
                 </span>
               </div>
             </div>
@@ -556,56 +510,16 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
               <Activity className="h-4 w-4 text-brand-primary" />
               <h3 className="font-sans text-xs font-black uppercase tracking-wider text-brand-primary">Month to Date ({companyKPIs.reportingMonth})</h3>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* MTD Opening Float */}
+            <div className="grid grid-cols-1 gap-4">
               <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
                 <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">MTD Opening Float</span>
-                  <span className="block font-sans text-xl font-black text-brand-text mt-2 font-mono">
-                    TZS {companyKPIs.mtdOpeningFloat.toLocaleString()}
-                  </span>
-                </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-brand-text-variant bg-brand-gray-hover px-2 py-0.5 rounded">
-                  MONTH OPENING
-                </span>
-              </div>
-
-              {/* MTD Float Received */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">MTD Float Received</span>
-                  <span className="block font-sans text-xl font-black text-status-success-text mt-2 font-mono">
-                    TZS {companyKPIs.mtdFloatReceived.toLocaleString()}
-                  </span>
-                </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-status-success-text bg-status-success-bg px-2 py-0.5 rounded">
-                  MONTH INGESTED
-                </span>
-              </div>
-
-              {/* MTD Float Served */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">MTD Float Served</span>
+                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">Total Volume</span>
                   <span className="block font-sans text-xl font-black text-status-info-text mt-2 font-mono">
                     TZS {companyKPIs.mtdFloatServed.toLocaleString()}
                   </span>
                 </div>
                 <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-status-info-text bg-status-info-bg px-2 py-0.5 rounded">
-                  MONTH SERVED
-                </span>
-              </div>
-
-              {/* MTD Closing Float */}
-              <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient flex flex-col justify-between">
-                <div>
-                  <span className="block font-sans text-[10px] font-bold text-brand-text-variant uppercase tracking-wider">MTD Closing Float</span>
-                  <span className="block font-sans text-xl font-black text-brand-text mt-2 font-mono">
-                    TZS {companyKPIs.mtdClosingFloat.toLocaleString()}
-                  </span>
-                </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-brand-text-variant bg-brand-gray-hover px-2 py-0.5 rounded">
-                  MONTH CLOSING
+                  TOTAL SERVICED MONTH-TO-DATE
                 </span>
               </div>
             </div>
@@ -631,16 +545,16 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
                 </span>
               </div>
 
-              {/* Total IOP Ledger */}
-              <div className="rounded-2xl border border-purple-200 bg-purple-50/50 p-5 shadow-ambient flex flex-col justify-between">
+              {/* IOP Volume */}
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-ambient flex flex-col justify-between">
                 <div>
-                  <span className="block font-sans text-[10px] font-bold text-purple-800 uppercase tracking-wider">Total IOP Ledger</span>
-                  <span className="block font-sans text-xl font-black text-purple-950 mt-2 font-mono">
-                    TZS {(companyKPIs.totalIop || 0).toLocaleString()}
+                  <span className="block font-sans text-[10px] font-bold text-emerald-800 uppercase tracking-wider">IOP Volume</span>
+                  <span className="block font-sans text-xl font-black text-emerald-950 mt-2 font-mono">
+                    TZS {(companyKPIs.totalIopVolume || 0).toLocaleString()}
                   </span>
                 </div>
-                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-purple-800 bg-purple-200/70 px-2 py-0.5 rounded">
-                  BASE CROSS OWNER VOLUME
+                <span className="inline-block mt-3 self-start font-sans text-[10px] font-bold text-emerald-800 bg-emerald-200/70 px-2 py-0.5 rounded">
+                  EXTERNAL SERVICED VOLUME
                 </span>
               </div>
             </div>
@@ -822,172 +736,7 @@ export default function DashboardView({ onNavigate, onSelectOwner }: DashboardVi
         )}
       </motion.div>
 
-      {/* 2. Middle Grid Section (Performance Trend, Top Owners) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* Performance Trend Chart Card (col-span-8) */}
-        <motion.div 
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.1 }}
-          className="lg:col-span-8 rounded-2xl border border-brand-gray-border bg-brand-card p-6 shadow-ambient flex flex-col justify-between"
-        >
-          <div>
-            <div className="flex items-center justify-between border-b border-brand-gray-border pb-4">
-              <div>
-                <h3 className="font-sans text-base font-bold text-brand-text">Performance Trend</h3>
-                <p className="font-sans text-xs text-brand-text-variant">Monthly Target vs Achievement</p>
-              </div>
-              <span className="font-sans text-[11px] font-bold text-brand-text-variant/70">JUL - NOV</span>
-            </div>
 
-            {/* Custom high-fidelity SVG Area Line Chart */}
-            <div className="relative mt-6 h-56 w-full flex items-end justify-between px-2 font-mono">
-              {/* Background grid lines */}
-              <div className="absolute inset-x-0 bottom-4 top-2 flex flex-col justify-between pointer-events-none opacity-40">
-                <div className="border-t border-dashed border-brand-gray-border w-full" />
-                <div className="border-t border-dashed border-brand-gray-border w-full" />
-                <div className="border-t border-dashed border-brand-gray-border w-full" />
-                <div className="border-t border-dashed border-brand-gray-border w-full" />
-              </div>
-
-              <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none">
-                {/* Definitions for gorgeous gradients */}
-                <defs>
-                  <linearGradient id="chartGradientTarget" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#dae2ff" stopOpacity="0.4" />
-                    <stop offset="100%" stopColor="#dae2ff" stopOpacity="0" />
-                  </linearGradient>
-                  <linearGradient id="chartGradientAchieved" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#0055d4" stopOpacity="0.15" />
-                    <stop offset="100%" stopColor="#0055d4" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-
-                {/* Target Fill Area (Dotted/Light Blue concept) */}
-                <path 
-                  d="M 5,95 Q 25,60 50,45 T 95,30 L 95,95 L 5,95 Z" 
-                  fill="url(#chartGradientTarget)"
-                />
-                {/* Target Line */}
-                <path 
-                  d="M 5,95 Q 25,60 50,45 T 95,30" 
-                  fill="none" 
-                  stroke="var(--color-brand-gray-border)" 
-                  strokeWidth="2.5" 
-                  strokeDasharray="4 4"
-                />
-
-                {/* Achievement Area */}
-                <path 
-                  d={`M 5,95 C 25,75 50,35 95,${finalAchievedY} L 95,95 L 5,95 Z`} 
-                  fill="url(#chartGradientAchieved)"
-                />
-                {/* Achievement Line */}
-                <path 
-                  d={`M 5,95 C 25,75 50,35 95,${finalAchievedY}`} 
-                  fill="none" 
-                  stroke="var(--color-brand-primary)" 
-                  strokeWidth="3.5"
-                />
-
-                {/* Data point glowing highlights */}
-                <circle cx="50" cy="35" r="4.5" fill="var(--color-brand-primary)" stroke="var(--color-brand-card)" strokeWidth="2.5" />
-                <circle cx="95" cy={finalAchievedY} r="4.5" fill="var(--color-brand-primary)" stroke="var(--color-brand-card)" strokeWidth="2.5" />
-              </svg>
-
-              {/* X Axis Labels */}
-              <div className="absolute inset-x-0 bottom-0 flex justify-between px-1 text-[11px] font-bold text-brand-text-variant font-sans">
-                <span>JUL</span>
-                <span>AUG</span>
-                <span>SEP</span>
-                <span>OCT</span>
-                <span>NOV</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Chart Legend Indicators */}
-          <div className="mt-5 flex gap-4 border-t border-brand-gray-border pt-4">
-            <div className="flex items-center gap-1.5">
-              <span className="h-2.5 w-6 rounded bg-brand-gray-hover border border-dashed border-brand-gray-border" />
-              <span className="font-sans text-xs font-semibold text-brand-text-variant">Target</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="h-2.5 w-6 rounded bg-brand-primary" />
-              <span className="font-sans text-xs font-semibold text-brand-text">Achievement</span>
-            </div>
-          </div>
-        </motion.div>
-
-        {/* Top Owners List Card (col-span-4) */}
-        <motion.div 
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.15 }}
-          className="lg:col-span-4 rounded-2xl border border-brand-gray-border bg-brand-card p-6 shadow-ambient flex flex-col justify-between"
-        >
-          <div>
-            <div className="flex items-center justify-between border-b border-brand-gray-border pb-4">
-              <div>
-                <h3 className="font-sans text-base font-bold text-brand-text">Top Owners</h3>
-                <p className="font-sans text-xs text-brand-text-variant">Highest monthly achievements</p>
-              </div>
-              <Award className="h-5 w-5 text-brand-accent" />
-            </div>
-
-            {/* List with staggered entrance */}
-            <motion.div 
-              variants={containerVariants}
-              initial="hidden"
-              animate="show"
-              className="mt-4 space-y-3.5"
-            >
-              {topOwnersList.length === 0 ? (
-                <div className="text-center py-8 font-sans text-xs text-brand-text-variant font-medium">
-                  No owner achievements found. Upload servicing CSV to compute.
-                </div>
-              ) : (
-                topOwnersList.map((owner) => (
-                  <motion.div 
-                    key={owner.rank}
-                    variants={itemVariants}
-                    onClick={() => {
-                      onSelectOwner(owner.name);
-                      onNavigate(ViewType.OWNER_DETAILS);
-                    }}
-                    className="flex items-center justify-between p-2 rounded-xl hover:bg-brand-gray-hover/60 border border-transparent hover:border-brand-gray-border/55 cursor-pointer transition-all group"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono text-xs font-extrabold text-brand-primary bg-brand-primary-container/40 h-7 w-7 flex items-center justify-center rounded-lg">
-                        #{owner.rank}
-                      </span>
-                      <div>
-                        <h4 className="font-sans text-xs font-bold text-brand-text group-hover:text-brand-primary group-hover:underline transition-all">
-                          {owner.name}
-                        </h4>
-                        <p className="font-mono text-[9px] text-brand-text-variant">{owner.zone}</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <span className="font-sans text-xs font-bold text-status-success-text block">{owner.percentage}%</span>
-                      <span className="font-mono text-[9px] text-brand-text-variant">{owner.amount}</span>
-                    </div>
-                  </motion.div>
-                ))
-              )}
-            </motion.div>
-          </div>
-
-          <button 
-            onClick={() => onNavigate(ViewType.OWNERS)}
-            className="mt-4 w-full rounded-xl bg-brand-gray-hover py-2.5 font-sans text-xs font-semibold text-brand-primary hover:bg-brand-primary-container/40 transition-all text-center flex items-center justify-center gap-1 cursor-pointer"
-          >
-            Manage All Owners
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        </motion.div>
-      </div>
 
       {/* 3. Bottom Summary Metric Rows */}
       <motion.div 

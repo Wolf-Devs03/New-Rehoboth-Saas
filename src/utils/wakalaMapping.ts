@@ -37,7 +37,7 @@ export function buildOwnerWakalaMap(baseWakalas: BaseWakala[], owners: Owner[]):
   for (const record of baseWakalas) {
     const result = resolveOwnerMatch(record.ownerName, owners);
 
-    if (result.status === 'Matched' && result.matchedOwner) {
+    if (result.status === 'Matched' && result.matchedOwner && result.matchedOwner.id) {
       const entry = toWakalaEntry(record);
       const ownerId = result.matchedOwner.id;
       const existing = byOwnerId.get(ownerId);

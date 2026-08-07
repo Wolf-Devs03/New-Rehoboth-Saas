@@ -231,6 +231,10 @@ function AppContent() {
         />
       );
     } else if (hash === '#/admin/owner-details') {
+      if (!selectedOwnerName) {
+        window.location.hash = '#/admin/owners';
+        return null;
+      }
       currentView = ViewType.OWNER_DETAILS;
       contentNode = (
         <OwnerDetailsView 

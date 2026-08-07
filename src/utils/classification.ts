@@ -16,7 +16,7 @@ export interface ClassifiedRow {
 }
 
 /**
- * Classifies every Daily MGT row as SA_INTERNAL, BASE, BASE_CROSS_OWNER, 
+ * Classifies every Daily MGT row as SA_INTERNAL, BASE, 
  * or IOP by looking up Dest_MSISDN against the SA Till Registry, then the 
  * Base Wakala Index. 
  *
@@ -24,11 +24,9 @@ export interface ClassifiedRow {
  * 1. SA Till Registry Match:
  *    - Dest_MSISDN in saTillRegistry
  *    - Same owner -> SA_INTERNAL
- *    - Different owner -> BASE_CROSS_OWNER
  * 2. Base Wakala Index Match:
  *    - Dest_MSISDN (or altMsisdn) in baseWakalaIndex
- *    - Same owner -> BASE
- *    - Different owner -> BASE_CROSS_OWNER
+ *    - Any match -> BASE (credited to servicing owner)
  * 3. Fallback:
  *    - Dest_MSISDN matches neither -> IOP
  *
@@ -125,6 +123,10 @@ export function classifyServicingRows(
     }
 
     // --- STEP 2: Base Wakala Index Match ---
+    // Any match means this wakala IS registered within the company — this
+    // is always BASE volume, credited to whichever owner's till actually
+    // serviced it. Cross-owner servicing is no longer a separate bucket;
+    // it's just BASE volume attributed to the servicer.
     const baseMatch = destMsisdn ? baseWakalaByMsisdn.get(destMsisdn) : undefined;
     if (baseMatch) {
       const baseOwnerMatch = resolveOwnerMatch(baseMatch.ownerName, owners as any, 'Classification Engine');
@@ -134,10 +136,10 @@ export function classifyServicingRows(
       const sameOwner = (baseOwnerId && servicingOwnerId && baseOwnerId === servicingOwnerId) ||
         (baseOwnerName && servicingOwnerFinalName && baseOwnerName.trim().toLowerCase() === servicingOwnerFinalName.trim().toLowerCase());
 
-      const bucket: ClassificationBucket = sameOwner ? 'BASE' : 'BASE_CROSS_OWNER';
+      const bucket: ClassificationBucket = 'BASE';
       const ruleTriggered = sameOwner 
         ? 'Matched Base Wakala (Owner Match)' 
-        : 'Matched Base Wakala (Cross-Owner Match)';
+        : 'Matched Base Wakala (Serviced By Different Owner — Credited To Servicer)';
 
       const auditRecord: ClassificationAuditRecord = {
         id: `audit-${txId}-${idx}`,
@@ -158,8 +160,8 @@ export function classifyServicingRows(
       return {
         row,
         bucket,
-        attributedOwnerId: baseOwnerId || null,
-        attributedOwnerName: baseOwnerName || null,
+        attributedOwnerId: servicingOwnerId || null,
+        attributedOwnerName: servicingOwnerFinalName || null,
         matchedVia: 'base_wakala',
         auditRecord
       };
@@ -207,7 +209,6 @@ export function summarizeClassification(classified: ClassifiedRow[]) {
   const summary = {
     SA_INTERNAL: { count: 0, volume: 0 },
     BASE: { count: 0, volume: 0 },
-    BASE_CROSS_OWNER: { count: 0, volume: 0 },
     IOP: { count: 0, volume: 0 },
   };
   classified.forEach(c => {

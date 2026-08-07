@@ -36,38 +36,44 @@ export function resolveOwnerMatch(
 ): OwnerMatchResult {
   const ownerName = normalizeOwnerName(rawOwnerName);
   if (!ownerName) return { status: 'Unassigned' };
+  if (!Array.isArray(owners) || owners.length === 0) return { status: 'Unmatched' };
 
   const lowerOwner = ownerName.toLowerCase();
 
   // 1. Alias match (exact, case-insensitive)
   const aliasMatch = owners.find(o =>
-    (o.nameAliases || []).some(alias => alias.trim().toLowerCase() === lowerOwner)
+    o && (o.nameAliases || []).some(alias => alias && alias.trim().toLowerCase() === lowerOwner)
   );
   if (aliasMatch) {
     logNameResolution({
       timestamp: new Date().toISOString(),
       rawName: ownerName,
-      matchedOwnerId: aliasMatch.id,
-      matchedOwnerName: aliasMatch.name,
+      matchedOwnerId: aliasMatch.id || '',
+      matchedOwnerName: aliasMatch.name || '',
       matchedVia: 'alias',
       sourceContext,
     });
     return { status: 'Matched', matchedOwner: aliasMatch, matchedVia: 'alias' };
   }
 
-  // 2. Fallback heuristic (unchanged from before)
-  const heuristicMatch = owners.find(o =>
-    o.name.toLowerCase() === lowerOwner ||
-    o.id.toLowerCase() === lowerOwner ||
-    lowerOwner.includes(o.name.toLowerCase()) ||
-    o.name.toLowerCase().includes(lowerOwner)
-  );
+  // 2. Fallback heuristic
+  const heuristicMatch = owners.find(o => {
+    if (!o) return false;
+    const nameLower = o.name ? o.name.toLowerCase() : '';
+    const idLower = o.id ? o.id.toLowerCase() : '';
+    return (
+      (nameLower && nameLower === lowerOwner) ||
+      (idLower && idLower === lowerOwner) ||
+      (nameLower && lowerOwner.includes(nameLower)) ||
+      (nameLower && nameLower.includes(lowerOwner))
+    );
+  });
   if (heuristicMatch) {
     logNameResolution({
       timestamp: new Date().toISOString(),
       rawName: ownerName,
-      matchedOwnerId: heuristicMatch.id,
-      matchedOwnerName: heuristicMatch.name,
+      matchedOwnerId: heuristicMatch.id || '',
+      matchedOwnerName: heuristicMatch.name || '',
       matchedVia: 'heuristic',
       sourceContext,
     });
@@ -98,7 +104,7 @@ export function addNameAlias(ownerId: string, alias: string): void {
     if (!saved) return;
     const owners: Owner[] = JSON.parse(saved);
     const updated = owners.map(o => {
-      if (o.id !== ownerId) return o;
+      if (!o || !o.id || o.id !== ownerId) return o;
       const existingAliases = o.nameAliases || [];
       const alreadyPresent = existingAliases.some(
         a => a.trim().toLowerCase() === trimmedAlias.toLowerCase()

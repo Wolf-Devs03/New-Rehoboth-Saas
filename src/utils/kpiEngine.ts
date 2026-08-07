@@ -1,33 +1,90 @@
 import { ClassifiedRow } from './classification';
-import { AgentTarget, Owner } from '../types';
+import { AgentTarget, Owner, ManualOwnerTarget } from '../types';
 import { resolveOwnerMatch } from './ownerMatch';
+import { resolveOwnerTarget, getSavedManualOwnerTargets } from './targetResolution';
 
-export type KPI1Status = 'Excellent' | 'Good' | 'Average' | 'Low';
+export type KPI1Status = 'Green' | 'Blue' | 'Yellow' | 'Red';
+
+export interface OwnerMtdVolumeResult {
+  servedVolume: number;
+  baseVolume: number;
+  iopVolume: number;
+}
+
+/**
+ * Calculates MTD volume breakdown (served, base, iop) across classified rows for all owners.
+ */
+export function calculateMtdVolumes(
+  classifiedRows: ClassifiedRow[]
+): Map<string, OwnerMtdVolumeResult> {
+  const result = new Map<string, OwnerMtdVolumeResult>();
+
+  for (const cr of classifiedRows) {
+    if (cr.bucket === 'SA_INTERNAL') continue;
+    const actingOwnerId = cr.auditRecord?.ownerId;
+    if (!actingOwnerId || actingOwnerId === 'UNASSIGNED') continue;
+    const amount = cr.auditRecord?.amount || 0;
+
+    let existing = result.get(actingOwnerId);
+    if (!existing) {
+      existing = { servedVolume: 0, baseVolume: 0, iopVolume: 0 };
+      result.set(actingOwnerId, existing);
+    }
+
+    existing.servedVolume += amount;
+    if (cr.bucket === 'BASE') {
+      existing.baseVolume += amount;
+    } else if (cr.bucket === 'IOP') {
+      existing.iopVolume += amount;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Calculates MTD volume breakdown for a specific ownerId or overall if ownerId is omitted.
+ */
+export function calculateOwnerMtdVolume(
+  classifiedRows: ClassifiedRow[],
+  ownerId?: string
+): OwnerMtdVolumeResult {
+  if (!ownerId) {
+    let totalServed = 0;
+    let totalBase = 0;
+    let totalIop = 0;
+    for (const cr of classifiedRows) {
+      if (cr.bucket === 'SA_INTERNAL') continue;
+      const amount = cr.auditRecord?.amount || 0;
+      totalServed += amount;
+      if (cr.bucket === 'BASE') totalBase += amount;
+      else if (cr.bucket === 'IOP') totalIop += amount;
+    }
+    return { servedVolume: totalServed, baseVolume: totalBase, iopVolume: totalIop };
+  }
+
+  const map = calculateMtdVolumes(classifiedRows);
+  return map.get(ownerId) || { servedVolume: 0, baseVolume: 0, iopVolume: 0 };
+}
 
 export interface KPI1Result {
   ownerId: string;
   ownerName: string;
   period: string;
-  baseVolume: number;
-  iopVolume: number;
-  baseTarget: number;
-  iopTarget: number;
+  servedVolume: number;        // Base + IOP combined, excluding SA_INTERNAL
   monthlyTarget: number;
-  baseAttainmentPct: number;
-  iopAttainmentPct: number;
-  weightedScore: number;
+  paDayTarget: number;         // monthlyTarget / 24
+  achievementPercentage: number;   // uncapped, real value
+  displayPercentage: number;       // Math.min(achievementPercentage, 100) for display only
   status: KPI1Status;
-  hasTarget: boolean; // false if no AgentTarget record was found for this owner/period
+  hasTarget: boolean;
 }
 
-const BASE_WEIGHT = 0.70;
-const IOP_WEIGHT = 0.30;
-
-function getStatus(score: number): KPI1Status {
-  if (score >= 90) return 'Excellent';
-  if (score >= 70) return 'Good';
-  if (score >= 60) return 'Average';
-  return 'Low';
+function getStatus(pct: number): 'Green' | 'Blue' | 'Yellow' | 'Red' {
+  if (pct >= 90) return 'Green';
+  if (pct >= 70) return 'Blue';
+  if (pct >= 60) return 'Yellow';
+  return 'Red';
 }
 
 function round1(n: number): number {
@@ -35,7 +92,7 @@ function round1(n: number): number {
 }
 
 /**
- * Computes KPI 1 (weighted volume) for every owner, for a given period.
+ * Computes KPI 1 (Total Serviced Volume against monthly target) for every owner, for a given period.
  * Consumes ALREADY-classified rows (get these via getClassifiedRowsCached
  * in the caller) — this function does no classification itself, only
  * aggregation, so it stays fast and independently testable.
@@ -44,65 +101,49 @@ export function calculateKPI1(
   classifiedRows: ClassifiedRow[],
   agentTargets: AgentTarget[],
   owners: Owner[],
-  period: string
+  period: string,
+  manualTargets?: ManualOwnerTarget[]
 ): KPI1Result[] {
   const results: KPI1Result[] = [];
+  const actualManualTargets = manualTargets || getSavedManualOwnerTargets();
 
-  // Pre-resolve each target's owner once, rather than per-row
-  const targetsForPeriod = agentTargets.filter(t => t.period === period);
-  const targetByOwnerId = new Map<string, AgentTarget>();
-  for (const t of targetsForPeriod) {
-    const match = resolveOwnerMatch(t.ownerName, owners, 'KPI 1 Calculation');
-    if (match.matchedOwner) {
-      targetByOwnerId.set(match.matchedOwner.id, t);
-    }
-  }
-
-  // Pre-aggregate volume per owner in a single pass over classifiedRows,
-  // rather than re-scanning the full row set once per owner
-  const baseVolumeByOwner = new Map<string, number>();
-  const iopVolumeByOwner = new Map<string, number>();
-
-  for (const cr of classifiedRows) {
-    if (cr.bucket === 'SA_INTERNAL') continue;
-    const actingOwnerId = cr.auditRecord?.ownerId;
-    if (!actingOwnerId || actingOwnerId === 'UNASSIGNED') continue;
-    const amount = cr.auditRecord?.amount || 0;
-
-    if (cr.bucket === 'BASE') {
-      baseVolumeByOwner.set(actingOwnerId, (baseVolumeByOwner.get(actingOwnerId) || 0) + amount);
-    } else if (cr.bucket === 'BASE_CROSS_OWNER' || cr.bucket === 'IOP') {
-      iopVolumeByOwner.set(actingOwnerId, (iopVolumeByOwner.get(actingOwnerId) || 0) + amount);
-    }
-  }
+  // Aggregate served volume (BASE + IOP combined) per owner
+  const mtdVolumes = calculateMtdVolumes(classifiedRows);
 
   for (const owner of owners) {
-    const target = targetByOwnerId.get(owner.id);
-    const monthlyTarget = target?.monthlyTarget || 0;
-    const baseTarget = monthlyTarget * BASE_WEIGHT;
-    const iopTarget = monthlyTarget * IOP_WEIGHT;
+    if (!owner) continue;
+    const ownerId = owner.id || '';
+    
+    // Resolve target (manual override first, then uploaded agent target)
+    const targetRes = resolveOwnerTarget(
+      ownerId,
+      period,
+      actualManualTargets,
+      agentTargets,
+      owners
+    );
 
-    const baseVolume = baseVolumeByOwner.get(owner.id) || 0;
-    const iopVolume = iopVolumeByOwner.get(owner.id) || 0;
+    const monthlyTarget = targetRes.monthlyTarget || 0;
+    const paDayTarget = monthlyTarget / 24;
+    const ownerVolume = ownerId ? (mtdVolumes.get(ownerId) || { servedVolume: 0, baseVolume: 0, iopVolume: 0 }) : { servedVolume: 0, baseVolume: 0, iopVolume: 0 };
+    const servedVolume = ownerVolume.servedVolume;
 
-    const baseAttainmentPct = baseTarget > 0 ? Math.min(100, (baseVolume / baseTarget) * 100) : 0;
-    const iopAttainmentPct = iopTarget > 0 ? Math.min(100, (iopVolume / iopTarget) * 100) : 0;
-    const weightedScore = (baseAttainmentPct * BASE_WEIGHT) + (iopAttainmentPct * IOP_WEIGHT);
+    // Uncapped achievement percentage
+    const achievementPercentage = monthlyTarget > 0 ? (servedVolume / monthlyTarget) * 100 : 0;
+    // Capped display percentage
+    const displayPercentage = Math.min(100, achievementPercentage);
 
     results.push({
-      ownerId: owner.id,
-      ownerName: owner.name,
+      ownerId,
+      ownerName: owner.name || 'Unknown Owner',
       period,
-      baseVolume,
-      iopVolume,
-      baseTarget,
-      iopTarget,
+      servedVolume,
       monthlyTarget,
-      baseAttainmentPct: round1(baseAttainmentPct),
-      iopAttainmentPct: round1(iopAttainmentPct),
-      weightedScore: round1(Math.min(100, weightedScore)),
-      status: getStatus(weightedScore),
-      hasTarget: !!target,
+      paDayTarget,
+      achievementPercentage: round1(achievementPercentage),
+      displayPercentage: round1(displayPercentage),
+      status: getStatus(displayPercentage),
+      hasTarget: targetRes.source !== 'none' && monthlyTarget > 0,
     });
   }
 

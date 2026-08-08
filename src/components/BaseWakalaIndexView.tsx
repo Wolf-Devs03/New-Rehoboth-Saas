@@ -29,7 +29,10 @@ import {
   Check, 
   Slash,
   MapPin,
-  UserCheck
+  UserCheck,
+  Loader2,
+  Navigation,
+  AlertCircle
 } from 'lucide-react';
 
 const PAGE_SIZE = 25;
@@ -79,6 +82,41 @@ export default function BaseWakalaIndexView() {
   // --- Manual Edit / Add Modal ---
   const [editingEntity, setEditingEntity] = useState<Partial<BaseWakalaEntity> | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  const [isCapturingModalGps, setIsCapturingModalGps] = useState(false);
+  const [modalGpsError, setModalGpsError] = useState<string | null>(null);
+
+  const handleCaptureModalGps = () => {
+    setIsCapturingModalGps(true);
+    setModalGpsError(null);
+    if (!navigator.geolocation) {
+      const msg = 'Geolocation is not supported by your browser.';
+      setModalGpsError(msg);
+      setIsCapturingModalGps(false);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+        const capturedAt = new Date().toISOString();
+        const loc = { lat, lng, accuracy, capturedAt, address: editingEntity?.district || editingEntity?.region };
+        setEditingEntity(prev => prev ? { ...prev, location: loc } : null);
+        setIsCapturingModalGps(false);
+      },
+      (err) => {
+        setIsCapturingModalGps(false);
+        setModalGpsError(`GPS capture failed: ${err.message}`);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  useEffect(() => {
+    if (isAddModalOpen && editingEntity && !editingEntity.location && !isCapturingModalGps) {
+      handleCaptureModalGps();
+    }
+  }, [isAddModalOpen]);
 
   // --- Unmatched Owner Resolution ---
   const [resolvingId, setResolvingId] = useState<string | null>(null);
@@ -1156,6 +1194,50 @@ export default function BaseWakalaIndexView() {
                   placeholder="e.g. 0687654321"
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl focus:outline-none focus:border-brand-primary font-mono"
                 />
+              </div>
+
+              {/* GPS Location Indicator & Button */}
+              <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <MapPin className="h-4 w-4 text-brand-primary" />
+                  <span className="font-bold text-slate-700">GPS Location:</span>
+                  {isCapturingModalGps ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Capturing location...
+                    </span>
+                  ) : editingEntity?.location ? (
+                    editingEntity.location.accuracy && editingEntity.location.accuracy > 100 ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                        Low Accuracy ⚠️ ({Math.round(editingEntity.location.accuracy)}m &gt; 100m limit) — Lat: {editingEntity.location.lat.toFixed(4)}, Lng: {editingEntity.location.lng.toFixed(4)}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                        Location captured ✓ (Lat: {editingEntity.location.lat.toFixed(4)}, Lng: {editingEntity.location.lng.toFixed(4)}{editingEntity.location.accuracy ? `, ±${Math.round(editingEntity.location.accuracy)}m` : ''})
+                      </span>
+                    )
+                  ) : modalGpsError ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                      <AlertCircle className="h-3.5 w-3.5 text-rose-600" />
+                      {modalGpsError}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                      Location required
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCaptureModalGps}
+                  disabled={isCapturingModalGps}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-brand-primary bg-brand-primary/10 hover:bg-brand-primary/20 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Navigation className="h-3.5 w-3.5" />
+                  {editingEntity?.location ? 'Re-capture GPS' : 'Capture Location'}
+                </button>
               </div>
 
               <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-200">

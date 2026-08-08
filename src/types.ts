@@ -55,7 +55,7 @@ export interface WakalaEntry {
   district?: string;
   alternateNumber?: string;
   ownerMatchStatus?: 'Matched' | 'Unmatched' | 'Unassigned';
-  location?: { lat: number; lng: number; address?: string; capturedAt?: string };
+  location?: { lat: number; lng: number; accuracy?: number; address?: string; capturedAt?: string };
   photoId?: string;
   photoUrl?: string;
 }
@@ -89,6 +89,9 @@ export interface PriorityWakala {
   msisdn: string;       // normalized, matches Base Wakala Index format
   period: string;       // "YYYY-MM", the month this wakala is flagged priority for
   importedAt: string;
+  wakalaCode?: string;
+  ownerId?: string;
+  ownerName?: string;
 }
 
 export interface ManualOwnerTarget {
@@ -96,8 +99,6 @@ export interface ManualOwnerTarget {
   period: string;
   kpi1BaseTarget?: number;
   kpi1IopTarget?: number;
-  kpi2NormalTarget?: number;
-  kpi2PriorityTarget?: number;
   setBy: string;
   setAt: string;
 }
@@ -110,6 +111,9 @@ export interface AgentTarget {
   achievementPercentage: number; // pre-capped percentage from the source (0-1 range)
   period: string;             // e.g. "2026-07", derived from the report's stated date range
   importedAt: string;
+  ownerId?: string;
+  rawMsisdn?: string;
+  matchedTillMsisdn?: string;
 }
 
 export interface Owner {

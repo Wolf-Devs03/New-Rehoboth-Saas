@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
 import { 
   MapPin, 
@@ -100,6 +101,7 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedOwner, setSelectedOwner] = useState('ALL');
   const [selectedDistrict, setSelectedDistrict] = useState('ALL');
+  const [selectedSiteId, setSelectedSiteId] = useState('ALL');
   const [entityTypeFilter, setEntityTypeFilter] = useState<'ALL' | 'OWNER' | 'WAKALA'>('ALL');
 
   useEffect(() => {
@@ -124,11 +126,12 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
 
     loadedOwners.forEach((owner) => {
       const ownerId = owner.id || owner.name;
+      const hasOwnerLocation = !!owner.workLocation && typeof owner.workLocation.lat === 'number' && typeof owner.workLocation.lng === 'number';
       const ownerBaseLat = owner.workLocation?.lat ?? defaultLat;
       const ownerBaseLng = owner.workLocation?.lng ?? defaultLng;
 
-      // 1. Owner Entity (if workLocation exists)
-      if (owner.workLocation) {
+      // 1. Owner Entity (only if owner has its own workLocation)
+      if (hasOwnerLocation && owner.workLocation) {
         extractedEntities.push({
           id: `owner-${ownerId}`,
           type: 'OWNER',
@@ -147,16 +150,18 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
 
       // 2. Base Wakalas
       (owner.baseWakalas || []).forEach((w, idx) => {
-        let lat = ownerBaseLat;
-        let lng = ownerBaseLng;
+        let lat = 0;
+        let lng = 0;
         let isCaptured = false;
+        let hasValidCoordinates = false;
 
         if (w.location && typeof w.location.lat === 'number' && typeof w.location.lng === 'number') {
           lat = w.location.lat;
           lng = w.location.lng;
           isCaptured = true;
-        } else {
-          // Deterministic offset based on string hash
+          hasValidCoordinates = true;
+        } else if (hasOwnerLocation) {
+          // Fallback: Regional offset relative to owner base if owner has a location
           let hash = 0;
           const str = w.msisdn || w.id || `${idx}`;
           for (let i = 0; i < str.length; i++) {
@@ -167,38 +172,43 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
           const lngOffset = (((Math.abs(hash >> 3) % 80) - 40) * 0.0035);
           lat = ownerBaseLat + latOffset;
           lng = ownerBaseLng + lngOffset;
+          hasValidCoordinates = true;
         }
 
-        extractedEntities.push({
-          id: `wakala-base-${w.id}`,
-          type: 'WAKALA',
-          wakalaType: 'base',
-          name: w.name,
-          lat,
-          lng,
-          ownerName: owner.name,
-          district: w.district || w.region || owner.region,
-          siteId: w.siteId,
-          code: w.code,
-          msisdn: w.msisdn,
-          capturedAt: w.location?.capturedAt,
-          isCaptured,
-          wakala: w,
-          owner
-        });
+        if (hasValidCoordinates) {
+          extractedEntities.push({
+            id: `wakala-base-${w.id}`,
+            type: 'WAKALA',
+            wakalaType: 'base',
+            name: w.name,
+            lat,
+            lng,
+            ownerName: owner.name,
+            district: w.district || w.region || owner.region,
+            siteId: w.siteId,
+            code: w.code,
+            msisdn: w.msisdn,
+            capturedAt: w.location?.capturedAt,
+            isCaptured,
+            wakala: w,
+            owner
+          });
+        }
       });
 
       // 3. IOP Wakalas
       (owner.iopWakalas || []).forEach((w, idx) => {
-        let lat = ownerBaseLat;
-        let lng = ownerBaseLng;
+        let lat = 0;
+        let lng = 0;
         let isCaptured = false;
+        let hasValidCoordinates = false;
 
         if (w.location && typeof w.location.lat === 'number' && typeof w.location.lng === 'number') {
           lat = w.location.lat;
           lng = w.location.lng;
           isCaptured = true;
-        } else {
+          hasValidCoordinates = true;
+        } else if (hasOwnerLocation) {
           let hash = 0;
           const str = w.msisdn || w.id || `${idx + 500}`;
           for (let i = 0; i < str.length; i++) {
@@ -209,23 +219,26 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
           const lngOffset = (((Math.abs(hash >> 3) % 80) - 40) * 0.0035);
           lat = ownerBaseLat + latOffset;
           lng = ownerBaseLng + lngOffset;
+          hasValidCoordinates = true;
         }
 
-        extractedEntities.push({
-          id: `wakala-iop-${w.id}`,
-          type: 'WAKALA',
-          wakalaType: 'iop',
-          name: w.name,
-          lat,
-          lng,
-          ownerName: owner.name,
-          district: w.region || owner.region,
-          msisdn: w.msisdn,
-          capturedAt: w.location?.capturedAt,
-          isCaptured,
-          wakala: w,
-          owner
-        });
+        if (hasValidCoordinates) {
+          extractedEntities.push({
+            id: `wakala-iop-${w.id}`,
+            type: 'WAKALA',
+            wakalaType: 'iop',
+            name: w.name,
+            lat,
+            lng,
+            ownerName: owner.name,
+            district: w.region || owner.region,
+            msisdn: w.msisdn,
+            capturedAt: w.location?.capturedAt,
+            isCaptured,
+            wakala: w,
+            owner
+          });
+        }
       });
     });
 
@@ -257,6 +270,9 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
   const uniqueOwnersList = Array.from(new Set(entities.map(e => e.ownerName))).sort();
   const uniqueDistrictsList = Array.from(
     new Set(entities.map(e => e.district).filter((d): d is string => !!d))
+  ).sort();
+  const uniqueSiteIdsList = Array.from(
+    new Set(entities.map(e => e.siteId).filter((s): s is string => !!s))
   ).sort();
 
   // Filtered Map Entities
@@ -291,6 +307,11 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
       return false;
     }
 
+    // Site ID Filter
+    if (selectedSiteId !== 'ALL' && entity.siteId !== selectedSiteId) {
+      return false;
+    }
+
     return true;
   });
 
@@ -311,6 +332,16 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
 
   const ownerPinsCount = filteredEntities.filter(e => e.type === 'OWNER').length;
   const wakalaPinsCount = filteredEntities.filter(e => e.type === 'WAKALA').length;
+
+  const totalOwnersCount = owners.length;
+  const ownersPendingGpsCount = Math.max(0, totalOwnersCount - owners.filter(o => !!o.workLocation).length);
+
+  let totalWakalasCount = 0;
+  owners.forEach(o => {
+    totalWakalasCount += (o.baseWakalas?.length || 0) + (o.iopWakalas?.length || 0);
+  });
+  const wakalasWithLocationCount = entities.filter(e => e.type === 'WAKALA' && e.isCaptured).length;
+  const wakalasPendingGpsCount = Math.max(0, totalWakalasCount - wakalasWithLocationCount);
 
   if (isLoading) {
     return (
@@ -355,6 +386,26 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
             </div>
           </div>
 
+          {ownersPendingGpsCount > 0 && (
+            <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-2 rounded-xl text-amber-900 shadow-xs shrink-0" title="Owners missing GPS location">
+              <MapPin className="h-4 w-4 text-amber-600" />
+              <div className="font-sans text-xs font-bold leading-none">
+                <span>{ownersPendingGpsCount}</span>
+                <span className="text-[10px] text-amber-700 font-normal ml-1">Owners Pending GPS</span>
+              </div>
+            </div>
+          )}
+
+          {wakalasPendingGpsCount > 0 && (
+            <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-2 rounded-xl text-amber-900 shadow-xs shrink-0" title="Wakalas missing GPS location">
+              <MapPin className="h-4 w-4 text-amber-600" />
+              <div className="font-sans text-xs font-bold leading-none">
+                <span>{wakalasPendingGpsCount}</span>
+                <span className="text-[10px] text-amber-700 font-normal ml-1">Wakalas Pending GPS</span>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 bg-brand-card px-3 py-2 rounded-xl border border-brand-gray-border shadow-xs shrink-0 font-sans text-xs font-bold text-brand-text">
             <span>Total Mapped: {filteredEntities.length}</span>
           </div>
@@ -369,12 +420,13 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
             Field Network Filters
           </div>
 
-          {(searchTerm || selectedOwner !== 'ALL' || selectedDistrict !== 'ALL' || entityTypeFilter !== 'ALL') && (
+          {(searchTerm || selectedOwner !== 'ALL' || selectedDistrict !== 'ALL' || selectedSiteId !== 'ALL' || entityTypeFilter !== 'ALL') && (
             <button
               onClick={() => {
                 setSearchTerm('');
                 setSelectedOwner('ALL');
                 setSelectedDistrict('ALL');
+                setSelectedSiteId('ALL');
                 setEntityTypeFilter('ALL');
               }}
               className="flex items-center gap-1 text-[11px] font-bold text-rose-600 hover:text-rose-700 transition-colors cursor-pointer"
@@ -385,7 +437,7 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
           )}
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
           {/* Search Term Input */}
           <div className="relative">
             <label className="block text-[10px] font-bold text-brand-text-variant uppercase mb-1">Search Agent / Code</label>
@@ -427,6 +479,21 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
               <option value="ALL">All Districts / Regions ({uniqueDistrictsList.length})</option>
               {uniqueDistrictsList.map(dist => (
                 <option key={dist} value={dist}>{dist}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Site ID Filter */}
+          <div>
+            <label className="block text-[10px] font-bold text-brand-text-variant uppercase mb-1">Filter by Site ID</label>
+            <select
+              value={selectedSiteId}
+              onChange={(e) => setSelectedSiteId(e.target.value)}
+              className="w-full rounded-xl border border-brand-gray-border bg-white p-2 text-xs text-brand-text focus:outline-none focus:border-brand-primary cursor-pointer"
+            >
+              <option value="ALL">All Sites ({uniqueSiteIdsList.length})</option>
+              {uniqueSiteIdsList.map(siteId => (
+                <option key={siteId} value={siteId}>{siteId}</option>
               ))}
             </select>
           </div>
@@ -482,6 +549,7 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
               setSearchTerm('');
               setSelectedOwner('ALL');
               setSelectedDistrict('ALL');
+              setSelectedSiteId('ALL');
               setEntityTypeFilter('ALL');
             }}
             className="mt-4 rounded-xl bg-brand-primary px-4 py-2 text-xs font-bold text-white shadow-ambient hover:bg-brand-primary-light transition-all cursor-pointer"
@@ -505,7 +573,8 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
 
               <MapBoundsUpdater entities={filteredEntities} />
               
-              {filteredEntities.map((entity) => {
+              <MarkerClusterGroup>
+                {filteredEntities.map((entity) => {
                 const markerIcon = entity.type === 'OWNER' 
                   ? ownerMarkerIcon 
                   : entity.wakalaType === 'base' ? baseWakalaMarkerIcon : iopWakalaMarkerIcon;
@@ -644,6 +713,7 @@ export default function AdminFieldMapView({ onSelectOwner, onNavigate }: AdminFi
                   </Marker>
                 );
               })}
+              </MarkerClusterGroup>
             </MapContainer>
           </div>
         </div>

@@ -12,6 +12,7 @@ export interface BaseWakalaEntity {
   status: 'ACTIVE' | 'INACTIVE';
   createdAt: string;
   updatedAt: string;
+  location?: { lat: number; lng: number; accuracy?: number; address?: string; capturedAt?: string };
 
   // Optional legacy compatibility fields
   code?: string;

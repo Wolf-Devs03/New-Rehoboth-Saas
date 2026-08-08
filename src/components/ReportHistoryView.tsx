@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ViewType, AuditReport } from '../types';
 import { getAvatarUrl } from '../utils/avatar';
 import { 
@@ -30,9 +30,16 @@ export default function ReportHistoryView({
   const [selectedType, setSelectedType] = useState('All');
   const [selectedStatus, setSelectedStatus] = useState('All');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   const reportTypes = ['All', 'KPI Report', 'Transactions', 'Owners List', 'System Audit'];
   const statuses = ['All', 'Success', 'Processing', 'Failed', 'Success (Partial)'];
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedType, selectedStatus]);
 
   // Filter logic
   const filteredReports = useMemo(() => {
@@ -45,6 +52,22 @@ export default function ReportHistoryView({
       return matchesSearch && matchesType && matchesStatus;
     });
   }, [reports, searchQuery, selectedType, selectedStatus]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredReports.length / itemsPerPage));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [totalPages, currentPage]);
+
+  const paginatedReports = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredReports.slice(start, start + itemsPerPage);
+  }, [filteredReports, currentPage, itemsPerPage]);
+
+  const startItem = filteredReports.length === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
+  const endItem = Math.min(currentPage * itemsPerPage, filteredReports.length);
 
   const getStatusBadge = (status: AuditReport['status']) => {
     switch (status) {
@@ -114,7 +137,7 @@ export default function ReportHistoryView({
         <div>
           <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-brand-text">Report History</h2>
           <p className="text-sm text-brand-text-variant mt-1">
-            <strong>1,248</strong> audit logs generated this month • Last updated: Just now
+            <strong>{reports.length}</strong> audit log{reports.length === 1 ? '' : 's'} generated this month • Last updated: Just now
           </p>
         </div>
         <div className="flex gap-2.5">
@@ -244,8 +267,8 @@ export default function ReportHistoryView({
                 </tr>
               </thead>
               <tbody className={`divide-y divide-brand-gray-border transition-all duration-300 ${isRefreshing ? 'opacity-35 pointer-events-none' : 'opacity-100'}`}>
-                {filteredReports.length > 0 ? (
-                  filteredReports.map((rep) => (
+                {paginatedReports.length > 0 ? (
+                  paginatedReports.map((rep) => (
                     <tr key={rep.id} className="hover:bg-brand-gray-hover/30 transition-colors">
                       {/* File details with icons */}
                       <td className="px-6 py-4">
@@ -309,17 +332,39 @@ export default function ReportHistoryView({
 
           {/* Table pagination controls */}
           <div className="bg-brand-gray-hover/20 border-t border-brand-gray-border px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4 font-sans text-xs">
-            <span className="text-brand-text-variant">Showing 1 to {filteredReports.length} of 1,248 reports</span>
+            <span className="text-brand-text-variant">
+              Showing <strong className="text-brand-text">{startItem}</strong> to <strong className="text-brand-text">{endItem}</strong> of <strong className="text-brand-text">{filteredReports.length}</strong> report{filteredReports.length === 1 ? '' : 's'}
+            </span>
             <div className="flex items-center gap-1.5">
-              <button className="rounded-lg border border-brand-gray-border bg-white px-2.5 py-1.5 font-bold hover:bg-brand-gray-hover disabled:opacity-50" disabled>
+              <button
+                onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                disabled={currentPage === 1}
+                className="rounded-lg border border-brand-gray-border bg-white px-2.5 py-1.5 font-bold hover:bg-brand-gray-hover disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer"
+              >
                 Prev
               </button>
-              <button className="rounded-lg bg-brand-primary text-white px-3 py-1.5 font-bold">1</button>
-              <button className="rounded-lg text-brand-text-variant px-3 py-1.5 font-bold hover:bg-brand-gray-hover">2</button>
-              <button className="rounded-lg text-brand-text-variant px-3 py-1.5 font-bold hover:bg-brand-gray-hover">3</button>
-              <span className="px-1">...</span>
-              <button className="rounded-lg text-brand-text-variant px-3 py-1.5 font-bold hover:bg-brand-gray-hover">125</button>
-              <button className="rounded-lg border border-brand-gray-border bg-white px-2.5 py-1.5 font-bold hover:bg-brand-gray-hover">Next</button>
+              
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map(page => (
+                <button
+                  key={page}
+                  onClick={() => setCurrentPage(page)}
+                  className={`rounded-lg px-3 py-1.5 font-bold transition-all cursor-pointer ${
+                    currentPage === page
+                      ? 'bg-brand-primary text-white shadow-xs'
+                      : 'text-brand-text-variant hover:bg-brand-gray-hover'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+
+              <button
+                onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                disabled={currentPage === totalPages || filteredReports.length === 0}
+                className="rounded-lg border border-brand-gray-border bg-white px-2.5 py-1.5 font-bold hover:bg-brand-gray-hover disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer"
+              >
+                Next
+              </button>
             </div>
           </div>
         </div>

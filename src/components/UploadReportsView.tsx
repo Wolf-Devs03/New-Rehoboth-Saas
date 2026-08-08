@@ -205,7 +205,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
 
   const [stagedAgentTargets, setStagedAgentTargets] = useState<{
     record: AgentTarget;
-    ownerStatus: 'Matched' | 'Unmatched' | 'Unassigned';
+    ownerStatus: 'Matched' | 'Unmatched' | 'Till Not Registered' | 'Unassigned';
     matchedOwnerName?: string;
   }[] | null>(null);
 
@@ -246,6 +246,8 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
     ownerStatus: 'Matched' | 'Unmatched' | 'Unassigned';
     matchedOwnerName?: string;
   }[] | null>(null);
+
+  const [baseWakalaSuccess, setBaseWakalaSuccess] = useState<{ count: number; timestamp: string } | null>(null);
 
   const [showUnresolvedReview, setShowUnresolvedReview] = useState(false);
 
@@ -590,6 +592,10 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
 
     setBaseWakalas(updatedArray);
     setBaseWakalaLastUpdated(nowStr);
+    setBaseWakalaSuccess({
+      count: stagedBaseWakalas.length,
+      timestamp: nowStr,
+    });
     setStagedBaseWakalas(null);
     setSelectedFile(null);
 
@@ -618,49 +624,104 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
         return;
       }
 
-      const msisdnKeys = ['msisdn', 'wakala msisdn', 'priority wakala', 'phone', 'mobile', 'wakala', 'site msisdn'];
+      // Build Base Wakala Lookups (code map & msisdn map)
+      const currentBaseWakalas: BaseWakala[] = baseWakalas && baseWakalas.length > 0 ? baseWakalas : (() => {
+        try {
+          const saved = localStorage.getItem('baseWakalaIndex');
+          return saved ? JSON.parse(saved) : [];
+        } catch (e) {
+          return [];
+        }
+      })();
+
+      const codeMap = new Map<string, BaseWakala>();
+      const msisdnMap = new Map<string, BaseWakala>();
+
+      for (const bw of currentBaseWakalas) {
+        const code = bw.wakalaCode || (bw as any).code;
+        if (code && typeof code === 'string') {
+          codeMap.set(code.trim().toLowerCase(), bw);
+        }
+        if (bw.msisdn) {
+          const norm = normalizeMsisdn(bw.msisdn);
+          if (norm) msisdnMap.set(norm, bw);
+        }
+        const altNo = bw.alternateNumber || (bw as any).altMsisdn;
+        if (altNo) {
+          const normAlt = normalizeMsisdn(altNo);
+          if (normAlt) msisdnMap.set(normAlt, bw);
+        }
+      }
+
+      // Exact header match candidate arrays
+      const codeHeaderCandidates = ['wakala code', 'wakala_code', 'code', 'agent code', 'agent_code', 'terminal code', 'terminal_code'];
+      const msisdnHeaderCandidates = ['msisdn', 'wakala msisdn', 'wakala_msisdn', 'phone', 'mobile', 'site msisdn', 'site_msisdn', 'till msisdn', 'till_msisdn', 'phone number', 'alternate number', 'alt msisdn'];
+
+      let codeColKey: string | null = null;
+      let msisdnColKey: string | null = null;
+
+      if (rows.length > 0) {
+        const sampleKeys = Object.keys(rows[0]);
+        for (const k of sampleKeys) {
+          const cleanK = k.trim().toLowerCase();
+          if (!codeColKey && codeHeaderCandidates.includes(cleanK)) {
+            codeColKey = k;
+          }
+          if (!msisdnColKey && msisdnHeaderCandidates.includes(cleanK)) {
+            msisdnColKey = k;
+          }
+        }
+      }
+
       const currentDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
       const parsed: PriorityWakala[] = [];
-      const seenMsisdnInFile = new Set<string>();
+      const seenKeys = new Set<string>();
+      let rejectedCount = 0;
 
       for (const row of rows) {
-        let rawMsisdn = '';
-        for (const k of Object.keys(row)) {
-          const cleanK = k.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (!rawMsisdn) {
-            for (const target of msisdnKeys) {
-              if (cleanK === target.replace(/[^a-z0-9]/g, '') || cleanK.includes('msisdn')) {
-                rawMsisdn = String(row[k] || '').trim();
-                break;
-              }
-            }
-          }
+        const rawCode = codeColKey ? String(row[codeColKey] ?? '').trim() : '';
+        const rawMsisdn = msisdnColKey ? String(row[msisdnColKey] ?? '').trim() : '';
+
+        let matchedBase: BaseWakala | undefined = undefined;
+
+        // Priority (a): Exact code match against BaseWakala.wakalaCode
+        if (rawCode) {
+          matchedBase = codeMap.get(rawCode.toLowerCase());
         }
-        if (!rawMsisdn) {
-          for (const k of Object.keys(row)) {
-            if (/msisdn|phone|mobile|wakala/i.test(k)) {
-              rawMsisdn = String(row[k] || '').trim();
-              break;
-            }
+
+        // Priority (b): Exact msisdn/altMsisdn normalized match
+        if (!matchedBase && rawMsisdn) {
+          const normMsisdn = normalizeMsisdn(rawMsisdn);
+          if (normMsisdn) {
+            matchedBase = msisdnMap.get(normMsisdn);
           }
         }
 
-        const normalized = normalizeMsisdn(rawMsisdn);
-        if (normalized && !seenMsisdnInFile.has(normalized)) {
-          seenMsisdnInFile.add(normalized);
-          parsed.push({
-            msisdn: normalized,
-            period: priorityWakalaPeriod,
-            importedAt: currentDate,
-          });
+        if (matchedBase) {
+          const normMsisdn = normalizeMsisdn(matchedBase.msisdn || rawMsisdn);
+          const key = normMsisdn || matchedBase.wakalaCode || rawCode;
+          if (key && !seenKeys.has(key)) {
+            seenKeys.add(key);
+            parsed.push({
+              msisdn: normMsisdn,
+              wakalaCode: matchedBase.wakalaCode || (matchedBase as any).code || rawCode || undefined,
+              ownerId: matchedBase.ownerId || undefined,
+              ownerName: matchedBase.ownerName || undefined,
+              period: priorityWakalaPeriod,
+              importedAt: currentDate
+            });
+          }
+        } else {
+          rejectedCount++;
         }
       }
 
       if (parsed.length === 0) {
-        alert("No valid MSISDN numbers could be extracted from the file. Please check column headers (e.g. 'MSISDN', 'Priority Wakala').");
+        alert(`No Priority Wakala rows could be matched to the Base Wakala Index (${rejectedCount} rows rejected). Please ensure columns match exact headers like 'Wakala Code' or 'MSISDN', and records exist in the Base Wakala Index.`);
         return;
       }
 
+      alert(`Parsed ${parsed.length} Priority Wakalas successfully.${rejectedCount > 0 ? ` ${rejectedCount} rows were rejected because they could not be matched to an existing Base Wakala record.` : ''}`);
       setStagedPriorityWakalas(parsed);
     } catch (err) {
       console.error("Error parsing Priority Wakala file:", err);
@@ -712,6 +773,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
         return;
       }
 
+      const msisdnKeys = ['msisdn', 'owner msisdn', 'till msisdn', 'till number', 'phone', 'mobile', 'till', 'phone number'];
       const ownerKeys = ['owner', 'owner name', 'ownername', 'master agent name', 'agent name', 'name'];
       const locationKeys = ['location', 'block', 'zone', 'area'];
       const monthlyTargetKeys = ['total monthly target', 'monthly target', 'target', 'total target'];
@@ -719,13 +781,17 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
       const percentageKeys = ['achievement', 'achievement percentage', 'percentage', '% achieved', 'achieved %'];
 
       const masterOwners = getMasterOwners();
-      const currentDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      const tillsList = getTillsList();
 
-      const parsed: {
-        record: AgentTarget;
-        ownerStatus: 'Matched' | 'Unmatched' | 'Unassigned';
-        matchedOwnerName?: string;
-      }[] = [];
+      const tillMap = new Map<string, any>();
+      for (const t of tillsList) {
+        if (t.transactionTill) {
+          const normTill = normalizeMsisdn(t.transactionTill);
+          if (normTill) tillMap.set(normTill, t);
+        }
+      }
+
+      const currentDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
       const parseNum = (v: any): number => {
         if (typeof v === 'number') return v;
@@ -734,7 +800,19 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
         return isNaN(n) ? 0 : n;
       };
 
+      const parsed: {
+        record: AgentTarget;
+        ownerStatus: 'Matched' | 'Unmatched' | 'Till Not Registered' | 'Unassigned';
+        matchedOwnerName?: string;
+      }[] = [];
+
+      let matchedCount = 0;
+      let unmatchedCount = 0;
+      let notRegisteredCount = 0;
+      let skippedCount = 0;
+
       for (const row of rows) {
+        let rawMsisdn = '';
         let rawOwner = '';
         let rawLocation = '';
         let rawMonthlyTarget = '';
@@ -745,6 +823,11 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
           const cleanK = k.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
           const val = String(row[k] ?? '').trim();
 
+          if (!rawMsisdn) {
+            for (const t of msisdnKeys) {
+              if (cleanK === t.replace(/[^a-z0-9]/g, '')) { rawMsisdn = val; break; }
+            }
+          }
           if (!rawOwner) {
             for (const t of ownerKeys) {
               if (cleanK === t.replace(/[^a-z0-9]/g, '')) { rawOwner = val; break; }
@@ -772,7 +855,12 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
           }
         }
 
-        if (!rawOwner) continue; // a target row with no owner name is unusable, skip it
+        const normMsisdn = normalizeMsisdn(rawMsisdn);
+
+        if (!normMsisdn || !rawMonthlyTarget) {
+          skippedCount++;
+          continue;
+        }
 
         const monthlyTarget = parseNum(rawMonthlyTarget);
         const achievedValue = parseNum(rawAchieved);
@@ -780,29 +868,72 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
           ? parseNum(rawPercentage)
           : (monthlyTarget > 0 ? achievedValue / monthlyTarget : 0);
 
-        const ownerMatch = resolveOwnerMatch(rawOwner, masterOwners, 'Agent Target Import');
-        const ownerStatus = ownerMatch.status;
-        const matchedOwnerName = ownerMatch.matchedOwner?.name;
+        const matchedTill = tillMap.get(normMsisdn);
 
-        parsed.push({
-          record: {
-            ownerName: rawOwner,
-            location: rawLocation || undefined,
-            monthlyTarget,
-            achievedValue,
-            achievementPercentage,
-            period: agentTargetPeriod,
-            importedAt: currentDate,
-          },
-          ownerStatus,
-          matchedOwnerName,
-        });
+        if (!matchedTill) {
+          notRegisteredCount++;
+          parsed.push({
+            record: {
+              ownerName: rawOwner || 'Unknown',
+              location: rawLocation || undefined,
+              monthlyTarget,
+              achievedValue,
+              achievementPercentage,
+              period: agentTargetPeriod,
+              importedAt: currentDate,
+              rawMsisdn,
+              matchedTillMsisdn: undefined
+            },
+            ownerStatus: 'Till Not Registered'
+          });
+        } else {
+          const assignedOwner = matchedTill.assignedOwner;
+          const ownerMatch = resolveOwnerMatch(assignedOwner || rawOwner, masterOwners, 'Agent Target Import');
+
+          if (ownerMatch.status === 'Matched' && ownerMatch.matchedOwner) {
+            matchedCount++;
+            parsed.push({
+              record: {
+                ownerName: rawOwner || ownerMatch.matchedOwner.name,
+                location: rawLocation || undefined,
+                monthlyTarget,
+                achievedValue,
+                achievementPercentage,
+                period: agentTargetPeriod,
+                importedAt: currentDate,
+                ownerId: ownerMatch.matchedOwner.id,
+                rawMsisdn,
+                matchedTillMsisdn: normMsisdn
+              },
+              ownerStatus: 'Matched',
+              matchedOwnerName: ownerMatch.matchedOwner.name
+            });
+          } else {
+            unmatchedCount++;
+            parsed.push({
+              record: {
+                ownerName: rawOwner || assignedOwner || 'Unknown',
+                location: rawLocation || undefined,
+                monthlyTarget,
+                achievedValue,
+                achievementPercentage,
+                period: agentTargetPeriod,
+                importedAt: currentDate,
+                rawMsisdn,
+                matchedTillMsisdn: normMsisdn
+              },
+              ownerStatus: 'Unmatched'
+            });
+          }
+        }
       }
 
       if (parsed.length === 0) {
-        alert("No valid target rows could be extracted. Please check column headers (e.g. 'OWNER', 'TOTAL MONTHLY TARGET', 'TOTAL ACTUAL').");
+        alert(`No valid target rows could be extracted (${skippedCount} skipped due to missing MSISDN or Target). Please check column headers (e.g. 'MSISDN', 'TOTAL MONTHLY TARGET').`);
         return;
       }
+
+      alert(`Parsed ${parsed.length} Agent Target rows:\n• Matched Owners: ${matchedCount}\n• Unmatched Owners: ${unmatchedCount}\n• Till Not Registered: ${notRegisteredCount}${skippedCount > 0 ? `\n• Skipped (missing MSISDN/Target): ${skippedCount}` : ''}`);
 
       setStagedAgentTargets(parsed);
     } catch (err) {
@@ -2383,7 +2514,10 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                   <select
                     id="report-type-select"
                     value={reportType || ''}
-                    onChange={(e) => setReportType((e.target.value as any) || null)}
+                    onChange={(e) => {
+                      setReportType((e.target.value as any) || null);
+                      setBaseWakalaSuccess(null);
+                    }}
                     className="w-full rounded-xl border border-slate-300 bg-white text-slate-900 px-4 py-3 text-sm font-bold shadow-xs focus:border-brand-primary focus:outline-none focus:ring-2 focus:ring-brand-primary/20 cursor-pointer transition-all"
                   >
                     <option value="" disabled className="bg-white text-slate-900 font-medium">-- Select a Report Type --</option>
@@ -2880,27 +3014,36 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                     </motion.div>
                   )}
 
-                  {/* REGISTERED BASE WAKALA INDEX MANAGEMENT SECTION */}
-                  {(reportType === 'base_wakala_list' || baseWakalas.length > 0) && (
-                    <div className="bg-brand-card p-6 rounded-2xl border border-brand-gray-border shadow-xs">
-                      <div className="flex items-center gap-3">
-                        <MapPin className="h-5 w-5 text-brand-primary" />
+                  {/* BASE WAKALA INDEX TRANSIENT UPLOAD CONFIRMATION BANNER */}
+                  {reportType === 'base_wakala_list' && baseWakalaSuccess && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="bg-emerald-50/90 border border-emerald-200 rounded-2xl p-5 shadow-xs flex items-center justify-between gap-4"
+                    >
+                      <div className="flex items-center gap-3.5">
+                        <div className="h-10 w-10 rounded-xl bg-emerald-500 text-white flex items-center justify-center shrink-0 shadow-xs">
+                          <CheckCircle className="h-5 w-5" />
+                        </div>
                         <div>
-                          <h3 className="text-sm font-black text-brand-text">Registered Base Wakala Index</h3>
-                          <p className="text-xs text-brand-text-variant mt-0.5">
-                            {baseWakalas.length} entities registered. View, search, filter, and manage the
-                            full directory on the dedicated Base Wakala page.
+                          <h4 className="text-sm font-bold text-emerald-950">
+                            Base Wakala Index Report Uploaded
+                          </h4>
+                          <p className="text-xs text-emerald-700 mt-0.5">
+                            Successfully committed {baseWakalaSuccess.count} records to the master index ({baseWakalaSuccess.timestamp}).
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => { window.location.hash = '#/admin/base'; }}
-                          className="ml-auto text-xs font-bold text-brand-primary hover:underline cursor-pointer whitespace-nowrap"
-                        >
-                          Open Base Wakala Directory →
-                        </button>
                       </div>
-                    </div>
+                      <button
+                        type="button"
+                        onClick={() => setBaseWakalaSuccess(null)}
+                        className="p-1.5 text-emerald-700 hover:text-emerald-900 hover:bg-emerald-100/60 rounded-lg transition-colors cursor-pointer"
+                        title="Dismiss notification"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </motion.div>
                   )}
 
                   {/* PRIORITY WAKALA LIST STAGING PREVIEW CARD */}
@@ -2951,7 +3094,9 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                           <thead className="bg-slate-50 text-slate-700 font-extrabold sticky top-0 border-b border-slate-200">
                             <tr>
                               <th className="px-4 py-2.5">Index</th>
+                              <th className="px-4 py-2.5">Wakala Code</th>
                               <th className="px-4 py-2.5">Wakala MSISDN</th>
+                              <th className="px-4 py-2.5">Resolved Owner</th>
                               <th className="px-4 py-2.5">Scope Period</th>
                               <th className="px-4 py-2.5">Import Date</th>
                             </tr>
@@ -2960,7 +3105,9 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                             {stagedPriorityWakalas.map((p, idx) => (
                               <tr key={idx} className="hover:bg-slate-50">
                                 <td className="px-4 py-2 font-mono text-slate-400">{idx + 1}</td>
+                                <td className="px-4 py-2 font-mono text-slate-700 font-bold">{p.wakalaCode || '—'}</td>
                                 <td className="px-4 py-2 font-mono font-bold text-brand-text">{p.msisdn}</td>
+                                <td className="px-4 py-2 font-medium text-slate-800">{p.ownerName ? `${p.ownerName}${p.ownerId ? ` (${p.ownerId})` : ''}` : '—'}</td>
                                 <td className="px-4 py-2 font-mono text-slate-600">{p.period}</td>
                                 <td className="px-4 py-2 text-slate-500 font-mono text-[11px]">{p.importedAt}</td>
                               </tr>
@@ -3053,6 +3200,11 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                               Unmatched Owners: {stagedAgentTargets.filter(t => t.ownerStatus === 'Unmatched').length} — Resolve
                             </button>
                           )}
+                          {stagedAgentTargets.filter(t => t.ownerStatus === 'Till Not Registered').length > 0 && (
+                            <span className="text-xs font-bold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-full border border-rose-200">
+                              Till Not Registered: {stagedAgentTargets.filter(t => t.ownerStatus === 'Till Not Registered').length}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <p className="text-xs text-brand-text-variant">
@@ -3066,6 +3218,7 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                           <thead className="bg-slate-50 text-slate-700 font-extrabold sticky top-0 border-b border-slate-200">
                             <tr>
                               <th className="px-4 py-2.5">Owner</th>
+                              <th className="px-4 py-2.5">Till MSISDN</th>
                               <th className="px-4 py-2.5">Location</th>
                               <th className="px-4 py-2.5">Monthly Target</th>
                               <th className="px-4 py-2.5">Achieved</th>
@@ -3076,7 +3229,13 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                           <tbody className="divide-y divide-slate-100 bg-white">
                             {stagedAgentTargets.map((item, idx) => (
                               <tr key={idx} className="hover:bg-slate-50">
-                                <td className="px-4 py-2 font-bold text-brand-text">{item.record.ownerName}</td>
+                                <td className="px-4 py-2 font-bold text-brand-text">
+                                  {item.record.ownerName}
+                                  {item.matchedOwnerName && item.matchedOwnerName !== item.record.ownerName && (
+                                    <span className="block text-[10px] text-slate-500 font-normal">→ {item.matchedOwnerName}</span>
+                                  )}
+                                </td>
+                                <td className="px-4 py-2 font-mono font-bold text-brand-text">{item.record.rawMsisdn || '—'}</td>
                                 <td className="px-4 py-2 text-slate-600">{item.record.location || '—'}</td>
                                 <td className="px-4 py-2 font-mono">{item.record.monthlyTarget.toLocaleString()}</td>
                                 <td className="px-4 py-2 font-mono">{item.record.achievedValue.toLocaleString()}</td>
@@ -3088,7 +3247,11 @@ export default function UploadReportsView({ onNavigate, onAddAuditReport }: Uplo
                                     </span>
                                   ) : item.ownerStatus === 'Unmatched' ? (
                                     <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                                      <AlertTriangle className="h-3 w-3" /> Unmatched
+                                      <AlertTriangle className="h-3 w-3" /> Unmatched Owner
+                                    </span>
+                                  ) : item.ownerStatus === 'Till Not Registered' ? (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">
+                                      <AlertCircle className="h-3 w-3" /> Till Not Registered
                                     </span>
                                   ) : (
                                     <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">

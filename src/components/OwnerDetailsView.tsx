@@ -31,12 +31,15 @@ import {
   Trash2,
   X,
   Loader2,
-  Navigation
+  Navigation,
+  Settings2,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getServicingRows } from '../utils/indexedDB';
 import { getClassifiedRowsCached } from '../utils/classificationCache';
 import { calculateOwnerMtdVolume } from '../utils/kpiEngine';
+import { calculateKPI2 } from '../utils/kpi2Engine';
 import { resolveOwnerMatch } from '../utils/ownerMatch';
 import { AgentTarget, ManualOwnerTarget } from '../types';
 import { useAuth } from './AuthContext';
@@ -44,8 +47,7 @@ import {
   resolveOwnerTarget, 
   getSavedManualOwnerTargets, 
   saveManualOwnerTarget, 
-  clearManualOwnerTargetKpi1Override, 
-  clearManualOwnerTargetKpi2Override 
+  clearManualOwnerTargetKpi1Override 
 } from '../utils/targetResolution';
 
 const regionsList = [
@@ -570,7 +572,14 @@ export default function OwnerDetailsView({
 
         const totalVal = wRows.reduce((sum, r) => Math.abs(getAmountVal(r)), 0);
 
-        if (totalTxns > 6 || totalVal > 600000) {
+        const isActiveRowStatus = wRows.some(r => {
+          const val = r.wakala_status ?? r.Wakala_Status ?? r['Wakala Status'] ?? r['wakala status'] ?? r.status ?? r.Status;
+          if (val === undefined || val === null || val === '') return false;
+          return Number(val) === 1;
+        });
+
+        const isServed = isActiveRowStatus ? (totalTxns > 6 || totalVal > 600000) : (totalTxns > 6);
+        if (isServed) {
           active++;
         }
       }
@@ -674,6 +683,11 @@ export default function OwnerDetailsView({
     }
   }, [localOwner]);
 
+  const [manualTargetsList, setManualTargetsList] = useState<ManualOwnerTarget[]>(() => getSavedManualOwnerTargets());
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [showTargetPanel, setShowTargetPanel] = useState(false);
+
   const ownerMtdData = useMemo(() => {
     if (!localOwner || servicingRows.length === 0) {
       return {
@@ -708,7 +722,7 @@ export default function OwnerDetailsView({
 
     const savedTargets = localStorage.getItem('agentTargets');
     const agentTargets: AgentTarget[] = savedTargets ? JSON.parse(savedTargets) : [];
-    const manualTargets = getSavedManualOwnerTargets();
+    const manualTargets = manualTargetsList;
 
     let period = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     const periods = agentTargets.map(t => t.period).filter((p): p is string => Boolean(p));
@@ -744,7 +758,7 @@ export default function OwnerDetailsView({
       status,
       hasTarget: targetRes.source !== 'none' && monthlyTarget > 0
     };
-  }, [localOwner, servicingRows, tillsList]);
+  }, [localOwner, servicingRows, tillsList, manualTargetsList]);
 
   const { user } = useAuth();
   const isAdmin = !user || user.role === 'Admin';
@@ -754,8 +768,6 @@ export default function OwnerDetailsView({
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   });
 
-  const [manualTargetsList, setManualTargetsList] = useState<ManualOwnerTarget[]>(() => getSavedManualOwnerTargets());
-
   const currentManual = useMemo(() => {
     if (!localOwner?.id) return undefined;
     return manualTargetsList.find(m => m.ownerId === localOwner.id && m.period === targetPeriod);
@@ -763,20 +775,14 @@ export default function OwnerDetailsView({
 
   const [kpi1BaseInput, setKpi1BaseInput] = useState<string>('');
   const [kpi1IopInput, setKpi1IopInput] = useState<string>('');
-  const [kpi2NormalInput, setKpi2NormalInput] = useState<string>('');
-  const [kpi2PriorityInput, setKpi2PriorityInput] = useState<string>('');
 
   useEffect(() => {
     if (currentManual) {
       setKpi1BaseInput(currentManual.kpi1BaseTarget !== undefined ? String(currentManual.kpi1BaseTarget) : '');
       setKpi1IopInput(currentManual.kpi1IopTarget !== undefined ? String(currentManual.kpi1IopTarget) : '');
-      setKpi2NormalInput(currentManual.kpi2NormalTarget !== undefined ? String(currentManual.kpi2NormalTarget) : '');
-      setKpi2PriorityInput(currentManual.kpi2PriorityTarget !== undefined ? String(currentManual.kpi2PriorityTarget) : '');
     } else {
       setKpi1BaseInput('');
       setKpi1IopInput('');
-      setKpi2NormalInput('');
-      setKpi2PriorityInput('');
     }
   }, [currentManual, localOwner?.id, targetPeriod]);
 
@@ -787,7 +793,6 @@ export default function OwnerDetailsView({
   }, [kpi1BaseInput, kpi1IopInput]);
 
   const hasKpi1Manual = currentManual?.kpi1BaseTarget !== undefined || currentManual?.kpi1IopTarget !== undefined;
-  const hasKpi2Manual = currentManual?.kpi2NormalTarget !== undefined || currentManual?.kpi2PriorityTarget !== undefined;
 
   const hasKpi1Uploaded = useMemo(() => {
     if (!localOwner) return false;
@@ -806,26 +811,64 @@ export default function OwnerDetailsView({
     return false;
   }, [localOwner?.id, targetPeriod]);
 
+  // Derived KPI 2 Stats for the selected owner and period
+  const ownerKpi2Stats = useMemo(() => {
+    if (!localOwner) return null;
+    try {
+      const savedSaTills = localStorage.getItem('saTillRegistry');
+      const saTillRegistry = savedSaTills ? JSON.parse(savedSaTills) : [];
+      const savedBaseWakalas = localStorage.getItem('baseWakalaIndex');
+      const baseWakalaIndex = savedBaseWakalas ? JSON.parse(savedBaseWakalas) : [];
+      const savedOwners = localStorage.getItem('ownersList');
+      const owners: Owner[] = savedOwners ? JSON.parse(savedOwners) : [];
+      const savedPriority = localStorage.getItem('priorityWakalaList');
+      const priorityWakalas: PriorityWakala[] = savedPriority ? JSON.parse(savedPriority) : [];
+
+      const classified = getClassifiedRowsCached(servicingRows, saTillRegistry, baseWakalaIndex, tillsList, owners);
+      const kpi2Results = calculateKPI2(classified, owners, targetPeriod, undefined, priorityWakalas, baseWakalaIndex);
+      return kpi2Results.find(r => r.ownerId === localOwner.id) || null;
+    } catch (e) {
+      console.error("Error computing owner KPI2 stats:", e);
+      return null;
+    }
+  }, [localOwner, servicingRows, tillsList, targetPeriod]);
+
   const handleSaveAdminTargets = () => {
     if (!localOwner?.id) return;
-    const baseVal = kpi1BaseInput.trim() !== '' ? parseFloat(kpi1BaseInput) : undefined;
-    const iopVal = kpi1IopInput.trim() !== '' ? parseFloat(kpi1IopInput) : undefined;
-    const normalVal = kpi2NormalInput.trim() !== '' ? parseInt(kpi2NormalInput, 10) : undefined;
-    const priorityVal = kpi2PriorityInput.trim() !== '' ? parseInt(kpi2PriorityInput, 10) : undefined;
+
+    const parseOrKeep = (input: string, existing: number | undefined): number | undefined => {
+      if (input.trim() === '') return existing;
+      const val = parseFloat(input);
+      return !isNaN(val) && val >= 0 ? val : existing;
+    };
+
+    const baseVal = parseOrKeep(kpi1BaseInput, currentManual?.kpi1BaseTarget);
+    const iopVal = parseOrKeep(kpi1IopInput, currentManual?.kpi1IopTarget);
+
+    if (baseVal === undefined && iopVal === undefined) {
+      setSaveError('Enter at least one target value before saving.');
+      setTimeout(() => setSaveError(null), 3000);
+      return;
+    }
+    setSaveError(null);
 
     const targetObj: ManualOwnerTarget = {
       ownerId: localOwner.id,
       period: targetPeriod,
-      kpi1BaseTarget: baseVal !== undefined && !isNaN(baseVal) ? baseVal : undefined,
-      kpi1IopTarget: iopVal !== undefined && !isNaN(iopVal) ? iopVal : undefined,
-      kpi2NormalTarget: normalVal !== undefined && !isNaN(normalVal) ? normalVal : undefined,
-      kpi2PriorityTarget: priorityVal !== undefined && !isNaN(priorityVal) ? priorityVal : undefined,
+      kpi1BaseTarget: baseVal,
+      kpi1IopTarget: iopVal,
       setBy: user?.email || 'Admin',
       setAt: new Date().toISOString()
     };
 
     const updated = saveManualOwnerTarget(targetObj);
     setManualTargetsList(updated);
+
+    setSaveSuccess(true);
+    setTimeout(() => {
+      setSaveSuccess(false);
+      setShowTargetPanel(false);
+    }, 1500);
   };
 
   const handleClearKpi1Override = () => {
@@ -834,14 +877,6 @@ export default function OwnerDetailsView({
     setManualTargetsList(updated);
     setKpi1BaseInput('');
     setKpi1IopInput('');
-  };
-
-  const handleClearKpi2Override = () => {
-    if (!localOwner?.id) return;
-    const updated = clearManualOwnerTargetKpi2Override(localOwner.id, targetPeriod);
-    setManualTargetsList(updated);
-    setKpi2NormalInput('');
-    setKpi2PriorityInput('');
   };
 
   if (!localOwner) {
@@ -1178,7 +1213,24 @@ export default function OwnerDetailsView({
           </div>
 
           {/* Admin-Only: Targets & Priority Configuration */}
-          {isAdmin && (
+          {isAdmin && !showTargetPanel && (
+            <button
+              type="button"
+              onClick={() => setShowTargetPanel(true)}
+              className="w-full flex items-center justify-between rounded-2xl border border-brand-gray-border bg-brand-card p-5 shadow-ambient hover:bg-brand-gray-hover transition-all cursor-pointer"
+            >
+              <div className="flex items-center gap-2">
+                <Settings2 className="h-4.5 w-4.5 text-brand-primary" />
+                <span className="font-sans text-sm font-bold text-brand-text">Configure Targets & Priority Weighting</span>
+                <span className="text-[10px] font-extrabold text-amber-800 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md uppercase tracking-wider">
+                  Admin Access
+                </span>
+              </div>
+              <ChevronDown className="h-4.5 w-4.5 text-brand-text-variant" />
+            </button>
+          )}
+
+          {isAdmin && showTargetPanel && (
             <div className="rounded-2xl border border-brand-gray-border bg-brand-card p-6 shadow-ambient space-y-6">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-brand-gray-border pb-4">
                 <div>
@@ -1200,8 +1252,29 @@ export default function OwnerDetailsView({
                     onChange={(e) => setTargetPeriod(e.target.value)}
                     className="text-xs rounded-lg border border-slate-300 px-2.5 py-1.5 font-mono bg-white"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowTargetPanel(false)}
+                    className="text-brand-text-variant hover:text-brand-text p-1 rounded-lg cursor-pointer"
+                    aria-label="Close"
+                  >
+                    <X className="h-4.5 w-4.5" />
+                  </button>
                 </div>
               </div>
+
+              {saveSuccess && (
+                <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold px-4 py-2.5 rounded-xl">
+                  <CheckCircle2 className="h-4 w-4" />
+                  Target parameters saved successfully.
+                </div>
+              )}
+              {saveError && (
+                <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold px-4 py-2.5 rounded-xl">
+                  <AlertCircle className="h-4 w-4" />
+                  {saveError}
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* KPI 1 Configuration */}
@@ -1239,6 +1312,7 @@ export default function OwnerDetailsView({
                       <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">Base Target (TZS)</label>
                       <input
                         type="number"
+                        min="0"
                         placeholder="e.g. 50000000"
                         value={kpi1BaseInput}
                         onChange={(e) => setKpi1BaseInput(e.target.value)}
@@ -1249,6 +1323,7 @@ export default function OwnerDetailsView({
                       <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">IOP Target (TZS)</label>
                       <input
                         type="number"
+                        min="0"
                         placeholder="e.g. 30000000"
                         value={kpi1IopInput}
                         onChange={(e) => setKpi1IopInput(e.target.value)}
@@ -1265,58 +1340,49 @@ export default function OwnerDetailsView({
                   </div>
                 </div>
 
-                {/* KPI 2 Configuration */}
+                {/* KPI 2 Configuration (Auto-Derived Read-Only) */}
                 <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-4">
                   <div className="flex items-center justify-between flex-wrap gap-2">
-                    <h4 className="font-bold text-sm text-brand-text">KPI 2 — Active Wakala Target (Counts)</h4>
-                    <div className="flex items-center gap-2">
-                      {hasKpi2Manual ? (
-                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded-lg">
-                          Using: Manual Override
-                        </span>
-                      ) : (
-                        <span className="px-2.5 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300 rounded-lg">
-                          No Manual Target
-                        </span>
-                      )}
-                      {hasKpi2Manual && (
-                        <button
-                          type="button"
-                          onClick={handleClearKpi2Override}
-                          className="text-[10px] font-bold text-rose-700 hover:text-rose-900 underline cursor-pointer"
-                        >
-                          Clear Override
-                        </button>
-                      )}
-                    </div>
+                    <h4 className="font-bold text-sm text-brand-text">KPI 2 — Active Wakala Distribution & Weighting (Auto-Derived)</h4>
+                    <span className="px-2.5 py-0.5 text-[10px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-300 rounded-lg">
+                      Automatic Derivation Active
+                    </span>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">Normal Target (Count)</label>
-                      <input
-                        type="number"
-                        placeholder="e.g. 15"
-                        value={kpi2NormalInput}
-                        onChange={(e) => setKpi2NormalInput(e.target.value)}
-                        className="w-full text-xs font-mono rounded-lg border border-slate-300 px-3 py-2 bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-brand-text-variant uppercase tracking-wider mb-1">Priority Target (Count)</label>
-                      <input
-                        type="number"
-                        placeholder="e.g. 5"
-                        value={kpi2PriorityInput}
-                        onChange={(e) => setKpi2PriorityInput(e.target.value)}
-                        className="w-full text-xs font-mono rounded-lg border border-slate-300 px-3 py-2 bg-white"
-                      />
-                    </div>
-                  </div>
+                  <p className="text-xs text-brand-text-variant leading-relaxed">
+                    Normal / Priority weights and targets are derived automatically based on the owner's Wakala roster distribution and registered Priority Wakala entries for period <strong className="text-brand-text font-mono">{targetPeriod}</strong>.
+                  </p>
 
-                  <div className="p-3 bg-white rounded-lg border border-slate-200 flex items-center justify-between font-mono text-xs">
-                    <span className="font-bold text-slate-600">Weighting Rule:</span>
-                    <span className="font-bold text-slate-700">70% Normal / 30% Priority</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
+                    <div className="p-3 bg-white rounded-xl border border-slate-200 space-y-1">
+                      <div className="text-[10px] font-extrabold text-slate-500 uppercase">Normal Weight</div>
+                      <div className="text-base font-black text-brand-text">
+                        {ownerKpi2Stats ? `${ownerKpi2Stats.normalWeight}%` : '—'}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-sans">
+                        {ownerKpi2Stats ? `${ownerKpi2Stats.normalWakalaCount} Normal Wakalas` : '—'}
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-white rounded-xl border border-slate-200 space-y-1">
+                      <div className="text-[10px] font-extrabold text-amber-700 uppercase">Priority Weight</div>
+                      <div className="text-base font-black text-amber-900">
+                        {ownerKpi2Stats ? `${ownerKpi2Stats.priorityWeight}%` : '—'}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-sans">
+                        {ownerKpi2Stats ? `${ownerKpi2Stats.priorityWakalaCount} Priority Wakalas` : '—'}
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-white rounded-xl border border-slate-200 space-y-1">
+                      <div className="text-[10px] font-extrabold text-teal-700 uppercase">Company Share</div>
+                      <div className="text-base font-black text-teal-900">
+                        {ownerKpi2Stats ? `${ownerKpi2Stats.companySharePct}%` : '—'}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-sans">
+                        Share of Total Wakalas
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1325,9 +1391,9 @@ export default function OwnerDetailsView({
                 <button
                   type="button"
                   onClick={handleSaveAdminTargets}
-                  className="px-5 py-2.5 bg-brand-primary text-white text-xs font-bold rounded-xl hover:bg-opacity-90 shadow-sm cursor-pointer transition-all"
+                  className="px-5 py-2.5 bg-brand-primary text-white text-xs font-bold rounded-xl hover:bg-opacity-90 shadow-sm transition-all cursor-pointer"
                 >
-                  Save Target Parameters
+                  Save KPI 1 Targets
                 </button>
               </div>
             </div>
@@ -1734,10 +1800,102 @@ function WakalaManagementSection({
   const [baseCode, setBaseCode] = useState('');
   const [baseAltNumber, setBaseAltNumber] = useState('');
 
+  // Location states for Base Wakalas form
+  const [baseLocation, setBaseLocation] = useState<{ lat: number; lng: number; accuracy?: number; address?: string; capturedAt?: string } | null>(null);
+  const [isCapturingBaseGps, setIsCapturingBaseGps] = useState(false);
+  const [baseGpsError, setBaseGpsError] = useState<string | null>(null);
+
   // Form states for IOP Wakalas
   const [iopName, setIopName] = useState('');
   const [iopMsisdn, setIopMsisdn] = useState('');
   const [iopRegion, setIopRegion] = useState('Dar es Salaam');
+
+  // Location states for IOP Wakalas form
+  const [iopLocation, setIopLocation] = useState<{ lat: number; lng: number; accuracy?: number; address?: string; capturedAt?: string } | null>(null);
+  const [isCapturingIopGps, setIsCapturingIopGps] = useState(false);
+  const [iopGpsError, setIopGpsError] = useState<string | null>(null);
+
+  const handleCaptureBaseGps = () => {
+    setIsCapturingBaseGps(true);
+    setBaseGpsError(null);
+    if (!navigator.geolocation) {
+      const msg = 'Geolocation is not supported by your browser.';
+      setBaseGpsError(msg);
+      setIsCapturingBaseGps(false);
+      triggerNotification(msg, 'error');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+        const capturedAt = new Date().toISOString();
+        const loc = { lat, lng, accuracy, capturedAt, address: baseDistrict || baseRegion };
+        setBaseLocation(loc);
+        setIsCapturingBaseGps(false);
+
+        if (accuracy > 100) {
+          triggerNotification(`GPS captured with low accuracy (${Math.round(accuracy)}m > 100m limit). Please move outdoors or re-capture for better accuracy.`, 'error');
+        } else {
+          triggerNotification(`GPS Location captured ✓ (${Math.round(accuracy)}m accuracy)`, 'success');
+        }
+      },
+      (err) => {
+        setIsCapturingBaseGps(false);
+        const msg = `GPS capture failed: ${err.message}`;
+        setBaseGpsError(msg);
+        triggerNotification(msg, 'error');
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  const handleCaptureIopGps = () => {
+    setIsCapturingIopGps(true);
+    setIopGpsError(null);
+    if (!navigator.geolocation) {
+      const msg = 'Geolocation is not supported by your browser.';
+      setIopGpsError(msg);
+      setIsCapturingIopGps(false);
+      triggerNotification(msg, 'error');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+        const capturedAt = new Date().toISOString();
+        const loc = { lat, lng, accuracy, capturedAt, address: iopRegion };
+        setIopLocation(loc);
+        setIsCapturingIopGps(false);
+
+        if (accuracy > 100) {
+          triggerNotification(`GPS captured with low accuracy (${Math.round(accuracy)}m > 100m limit). Please move outdoors or re-capture for better accuracy.`, 'error');
+        } else {
+          triggerNotification(`GPS Location captured ✓ (${Math.round(accuracy)}m accuracy)`, 'success');
+        }
+      },
+      (err) => {
+        setIsCapturingIopGps(false);
+        const msg = `GPS capture failed: ${err.message}`;
+        setIopGpsError(msg);
+        triggerNotification(msg, 'error');
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  useEffect(() => {
+    if (showAddBase && !baseLocation && !isCapturingBaseGps) {
+      handleCaptureBaseGps();
+    }
+  }, [showAddBase]);
+
+  useEffect(() => {
+    if (showAddIop && !iopLocation && !isCapturingIopGps) {
+      handleCaptureIopGps();
+    }
+  }, [showAddIop]);
 
   // Selected Wakala Detail Modal State
   const [selectedWakala, setSelectedWakala] = useState<{ wakala: WakalaEntry; type: 'base' | 'iop' } | null>(null);
@@ -1886,7 +2044,8 @@ function WakalaManagementSection({
       siteId: baseSiteId.trim(),
       code: baseCode.trim(),
       alternateNumber: baseAltNumber.trim(),
-      dateAdded: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+      dateAdded: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+      location: baseLocation || undefined
     };
 
     const updatedBase = [...(localOwner.baseWakalas || []), newWakala];
@@ -1900,6 +2059,8 @@ function WakalaManagementSection({
     setBaseSiteId('');
     setBaseCode('');
     setBaseAltNumber('');
+    setBaseLocation(null);
+    setBaseGpsError(null);
     setShowAddBase(false);
     triggerNotification(`Base Wakala "${newWakala.name}" added successfully!`, 'success');
   };
@@ -1922,7 +2083,8 @@ function WakalaManagementSection({
       name: iopName.trim(),
       msisdn: cleanNum,
       region: iopRegion.trim(),
-      dateAdded: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+      dateAdded: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+      location: iopLocation || undefined
     };
 
     const updatedIop = [...(localOwner.iopWakalas || []), newWakala];
@@ -1931,6 +2093,8 @@ function WakalaManagementSection({
     // Reset form
     setIopName('');
     setIopMsisdn('');
+    setIopLocation(null);
+    setIopGpsError(null);
     setShowAddIop(false);
     triggerNotification(`IOP Wakala "${newWakala.name}" added successfully!`, 'success');
   };
@@ -2136,6 +2300,51 @@ function WakalaManagementSection({
                   />
                 </div>
               </div>
+              
+              {/* Location Capture Banner & Status */}
+              <div className="p-3 rounded-xl border border-brand-gray-border bg-white flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <MapPin className="h-4 w-4 text-brand-primary" />
+                  <span className="font-bold text-brand-text">GPS Location:</span>
+                  {isCapturingBaseGps ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Capturing location...
+                    </span>
+                  ) : baseLocation ? (
+                    baseLocation.accuracy && baseLocation.accuracy > 100 ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                        Low Accuracy ⚠️ ({Math.round(baseLocation.accuracy)}m &gt; 100m limit) — Lat: {baseLocation.lat.toFixed(4)}, Lng: {baseLocation.lng.toFixed(4)}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                        Location captured ✓ (Lat: {baseLocation.lat.toFixed(4)}, Lng: {baseLocation.lng.toFixed(4)}{baseLocation.accuracy ? `, ±${Math.round(baseLocation.accuracy)}m` : ''})
+                      </span>
+                    )
+                  ) : baseGpsError ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                      <AlertCircle className="h-3.5 w-3.5 text-rose-600" />
+                      {baseGpsError}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                      Location required
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCaptureBaseGps}
+                  disabled={isCapturingBaseGps}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-brand-primary bg-brand-primary/10 hover:bg-brand-primary/20 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Navigation className="h-3.5 w-3.5" />
+                  {baseLocation ? 'Re-capture GPS' : 'Capture Location'}
+                </button>
+              </div>
+
               <div className="flex justify-end pt-1">
                 <button
                   type="submit"
@@ -2311,6 +2520,51 @@ function WakalaManagementSection({
                   </select>
                 </div>
               </div>
+
+              {/* Location Capture Banner & Status */}
+              <div className="p-3 rounded-xl border border-brand-gray-border bg-white flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <MapPin className="h-4 w-4 text-brand-primary" />
+                  <span className="font-bold text-brand-text">GPS Location:</span>
+                  {isCapturingIopGps ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Capturing location...
+                    </span>
+                  ) : iopLocation ? (
+                    iopLocation.accuracy && iopLocation.accuracy > 100 ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                        Low Accuracy ⚠️ ({Math.round(iopLocation.accuracy)}m &gt; 100m limit) — Lat: {iopLocation.lat.toFixed(4)}, Lng: {iopLocation.lng.toFixed(4)}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                        Location captured ✓ (Lat: {iopLocation.lat.toFixed(4)}, Lng: {iopLocation.lng.toFixed(4)}{iopLocation.accuracy ? `, ±${Math.round(iopLocation.accuracy)}m` : ''})
+                      </span>
+                    )
+                  ) : iopGpsError ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                      <AlertCircle className="h-3.5 w-3.5 text-rose-600" />
+                      {iopGpsError}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                      Location required
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCaptureIopGps}
+                  disabled={isCapturingIopGps}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-brand-primary bg-brand-primary/10 hover:bg-brand-primary/20 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Navigation className="h-3.5 w-3.5" />
+                  {iopLocation ? 'Re-capture GPS' : 'Capture Location'}
+                </button>
+              </div>
+
               <div className="flex justify-end">
                 <button
                   type="submit"

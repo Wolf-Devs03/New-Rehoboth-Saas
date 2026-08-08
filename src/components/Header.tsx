@@ -291,7 +291,7 @@ export default function Header({
       case ViewType.SETTINGS:
         return [
           { label: 'Executive Portal', view: ViewType.DASHBOARD },
-          { label: 'System Settings', active: true }
+          { label: 'Settings', active: true }
         ];
       case ViewType.PERSONNEL:
         return [

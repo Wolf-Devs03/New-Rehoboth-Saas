@@ -6,6 +6,7 @@ import { normalizeMsisdn } from './msisdn';
  * Resolves KPI 1 target for a given owner and period.
  * Checks manual targets first (Base Target + IOP Target sum).
  * Falls back to uploaded agent targets from agentTargets array.
+ * Matches by ownerId first, falling back to name-based resolution.
  */
 export function resolveOwnerTarget(
   ownerId: string,
@@ -24,21 +25,29 @@ export function resolveOwnerTarget(
   // 2. Fall back to uploaded agent targets
   if (agentTargets && agentTargets.length > 0) {
     const targetsForPeriod = agentTargets.filter(t => t.period === period);
-    const owner = owners.find(o => o && o.id === ownerId);
 
-    if (owner && targetsForPeriod.length > 0) {
-      // First try match via resolveOwnerMatch
-      for (const t of targetsForPeriod) {
-        if (!t.ownerName) continue;
-        const match = resolveOwnerMatch(t.ownerName, owners, 'Target Resolution');
-        if (match.matchedOwner && match.matchedOwner.id === ownerId) {
-          return { monthlyTarget: t.monthlyTarget || 0, source: 'uploaded' };
-        }
+    if (targetsForPeriod.length > 0) {
+      // Direct ownerId match
+      const directMatch = targetsForPeriod.find(t => t.ownerId && t.ownerId === ownerId);
+      if (directMatch) {
+        return { monthlyTarget: directMatch.monthlyTarget || 0, source: 'uploaded' };
       }
-      // Fall back to direct name comparison
-      for (const t of targetsForPeriod) {
-        if (t.ownerName && owner.name && t.ownerName.trim().toLowerCase() === owner.name.trim().toLowerCase()) {
-          return { monthlyTarget: t.monthlyTarget || 0, source: 'uploaded' };
+
+      const owner = owners.find(o => o && o.id === ownerId);
+      if (owner) {
+        // Match via resolveOwnerMatch
+        for (const t of targetsForPeriod) {
+          if (!t.ownerName) continue;
+          const match = resolveOwnerMatch(t.ownerName, owners, 'Target Resolution');
+          if (match.matchedOwner && match.matchedOwner.id === ownerId) {
+            return { monthlyTarget: t.monthlyTarget || 0, source: 'uploaded' };
+          }
+        }
+        // Direct name comparison
+        for (const t of targetsForPeriod) {
+          if (t.ownerName && owner.name && t.ownerName.trim().toLowerCase() === owner.name.trim().toLowerCase()) {
+            return { monthlyTarget: t.monthlyTarget || 0, source: 'uploaded' };
+          }
         }
       }
     }
@@ -145,28 +154,6 @@ export function clearManualOwnerTargetKpi1Override(ownerId: string, period: stri
   if (existingIdx >= 0) {
     delete current[existingIdx].kpi1BaseTarget;
     delete current[existingIdx].kpi1IopTarget;
-    // If no other fields remain, remove the record
-    if (
-      current[existingIdx].kpi2NormalTarget === undefined &&
-      current[existingIdx].kpi2PriorityTarget === undefined
-    ) {
-      current.splice(existingIdx, 1);
-    }
-  }
-  localStorage.setItem('manualOwnerTargets', JSON.stringify(current));
-  return current;
-}
-
-/**
- * Clear KPI 2 manual target override for an owner and period
- */
-export function clearManualOwnerTargetKpi2Override(ownerId: string, period: string): ManualOwnerTarget[] {
-  const current = getSavedManualOwnerTargets();
-  const existingIdx = current.findIndex(m => m.ownerId === ownerId && m.period === period);
-  if (existingIdx >= 0) {
-    delete current[existingIdx].kpi2NormalTarget;
-    delete current[existingIdx].kpi2PriorityTarget;
-    // If no other fields remain, remove the record
     if (
       current[existingIdx].kpi1BaseTarget === undefined &&
       current[existingIdx].kpi1IopTarget === undefined
